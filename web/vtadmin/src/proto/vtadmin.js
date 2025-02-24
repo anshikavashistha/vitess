@@ -81562,7 +81562,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
          * @property {string|null} [scope] CheckThrottlerRequest scope
          * @property {boolean|null} [skip_request_heartbeats] CheckThrottlerRequest skip_request_heartbeats
          * @property {boolean|null} [ok_if_not_exists] CheckThrottlerRequest ok_if_not_exists
-         * @property {boolean|null} [multi_metrics_enabled] CheckThrottlerRequest multi_metrics_enabled
          */
 
         /**
@@ -81613,14 +81612,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
         CheckThrottlerRequest.prototype.ok_if_not_exists = false;
 
         /**
-         * CheckThrottlerRequest multi_metrics_enabled.
-         * @member {boolean} multi_metrics_enabled
-         * @memberof tabletmanagerdata.CheckThrottlerRequest
-         * @instance
-         */
-        CheckThrottlerRequest.prototype.multi_metrics_enabled = false;
-
-        /**
          * Creates a new CheckThrottlerRequest instance using the specified properties.
          * @function create
          * @memberof tabletmanagerdata.CheckThrottlerRequest
@@ -81652,8 +81643,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                 writer.uint32(/* id 3, wireType 0 =*/24).bool(message.skip_request_heartbeats);
             if (message.ok_if_not_exists != null && Object.hasOwnProperty.call(message, "ok_if_not_exists"))
                 writer.uint32(/* id 4, wireType 0 =*/32).bool(message.ok_if_not_exists);
-            if (message.multi_metrics_enabled != null && Object.hasOwnProperty.call(message, "multi_metrics_enabled"))
-                writer.uint32(/* id 5, wireType 0 =*/40).bool(message.multi_metrics_enabled);
             return writer;
         };
 
@@ -81704,10 +81693,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                         message.ok_if_not_exists = reader.bool();
                         break;
                     }
-                case 5: {
-                        message.multi_metrics_enabled = reader.bool();
-                        break;
-                    }
                 default:
                     reader.skipType(tag & 7);
                     break;
@@ -81755,9 +81740,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
             if (message.ok_if_not_exists != null && message.hasOwnProperty("ok_if_not_exists"))
                 if (typeof message.ok_if_not_exists !== "boolean")
                     return "ok_if_not_exists: boolean expected";
-            if (message.multi_metrics_enabled != null && message.hasOwnProperty("multi_metrics_enabled"))
-                if (typeof message.multi_metrics_enabled !== "boolean")
-                    return "multi_metrics_enabled: boolean expected";
             return null;
         };
 
@@ -81781,8 +81763,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                 message.skip_request_heartbeats = Boolean(object.skip_request_heartbeats);
             if (object.ok_if_not_exists != null)
                 message.ok_if_not_exists = Boolean(object.ok_if_not_exists);
-            if (object.multi_metrics_enabled != null)
-                message.multi_metrics_enabled = Boolean(object.multi_metrics_enabled);
             return message;
         };
 
@@ -81804,7 +81784,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                 object.scope = "";
                 object.skip_request_heartbeats = false;
                 object.ok_if_not_exists = false;
-                object.multi_metrics_enabled = false;
             }
             if (message.app_name != null && message.hasOwnProperty("app_name"))
                 object.app_name = message.app_name;
@@ -81814,8 +81793,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                 object.skip_request_heartbeats = message.skip_request_heartbeats;
             if (message.ok_if_not_exists != null && message.hasOwnProperty("ok_if_not_exists"))
                 object.ok_if_not_exists = message.ok_if_not_exists;
-            if (message.multi_metrics_enabled != null && message.hasOwnProperty("multi_metrics_enabled"))
-                object.multi_metrics_enabled = message.multi_metrics_enabled;
             return object;
         };
 
@@ -81876,7 +81853,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
          * Properties of a CheckThrottlerResponse.
          * @memberof tabletmanagerdata
          * @interface ICheckThrottlerResponse
-         * @property {number|null} [status_code] CheckThrottlerResponse status_code
          * @property {number|null} [value] CheckThrottlerResponse value
          * @property {number|null} [threshold] CheckThrottlerResponse threshold
          * @property {string|null} [error] CheckThrottlerResponse error
@@ -81903,14 +81879,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                     if (properties[keys[i]] != null)
                         this[keys[i]] = properties[keys[i]];
         }
-
-        /**
-         * CheckThrottlerResponse status_code.
-         * @member {number} status_code
-         * @memberof tabletmanagerdata.CheckThrottlerResponse
-         * @instance
-         */
-        CheckThrottlerResponse.prototype.status_code = 0;
 
         /**
          * CheckThrottlerResponse value.
@@ -82008,8 +81976,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
         CheckThrottlerResponse.encode = function encode(message, writer) {
             if (!writer)
                 writer = $Writer.create();
-            if (message.status_code != null && Object.hasOwnProperty.call(message, "status_code"))
-                writer.uint32(/* id 1, wireType 0 =*/8).int32(message.status_code);
             if (message.value != null && Object.hasOwnProperty.call(message, "value"))
                 writer.uint32(/* id 2, wireType 1 =*/17).double(message.value);
             if (message.threshold != null && Object.hasOwnProperty.call(message, "threshold"))
@@ -82065,10 +82031,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
             while (reader.pos < end) {
                 let tag = reader.uint32();
                 switch (tag >>> 3) {
-                case 1: {
-                        message.status_code = reader.int32();
-                        break;
-                    }
                 case 2: {
                         message.value = reader.double();
                         break;
@@ -82159,9 +82121,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
         CheckThrottlerResponse.verify = function verify(message) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (message.status_code != null && message.hasOwnProperty("status_code"))
-                if (!$util.isInteger(message.status_code))
-                    return "status_code: integer expected";
             if (message.value != null && message.hasOwnProperty("value"))
                 if (typeof message.value !== "number")
                     return "value: number expected";
@@ -82220,8 +82179,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
             if (object instanceof $root.tabletmanagerdata.CheckThrottlerResponse)
                 return object;
             let message = new $root.tabletmanagerdata.CheckThrottlerResponse();
-            if (object.status_code != null)
-                message.status_code = object.status_code | 0;
             if (object.value != null)
                 message.value = Number(object.value);
             if (object.threshold != null)
@@ -82297,7 +82254,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
             if (options.objects || options.defaults)
                 object.metrics = {};
             if (options.defaults) {
-                object.status_code = 0;
                 object.value = 0;
                 object.threshold = 0;
                 object.error = "";
@@ -82307,8 +82263,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                 object.summary = "";
                 object.response_code = options.enums === String ? "UNDEFINED" : 0;
             }
-            if (message.status_code != null && message.hasOwnProperty("status_code"))
-                object.status_code = message.status_code;
             if (message.value != null && message.hasOwnProperty("value"))
                 object.value = options.json && !isFinite(message.value) ? String(message.value) : message.value;
             if (message.threshold != null && message.hasOwnProperty("threshold"))
@@ -82367,7 +82321,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
              * @memberof tabletmanagerdata.CheckThrottlerResponse
              * @interface IMetric
              * @property {string|null} [name] Metric name
-             * @property {number|null} [status_code] Metric status_code
              * @property {number|null} [value] Metric value
              * @property {number|null} [threshold] Metric threshold
              * @property {string|null} [error] Metric error
@@ -82398,14 +82351,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
              * @instance
              */
             Metric.prototype.name = "";
-
-            /**
-             * Metric status_code.
-             * @member {number} status_code
-             * @memberof tabletmanagerdata.CheckThrottlerResponse.Metric
-             * @instance
-             */
-            Metric.prototype.status_code = 0;
 
             /**
              * Metric value.
@@ -82481,8 +82426,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                     writer = $Writer.create();
                 if (message.name != null && Object.hasOwnProperty.call(message, "name"))
                     writer.uint32(/* id 1, wireType 2 =*/10).string(message.name);
-                if (message.status_code != null && Object.hasOwnProperty.call(message, "status_code"))
-                    writer.uint32(/* id 2, wireType 0 =*/16).int32(message.status_code);
                 if (message.value != null && Object.hasOwnProperty.call(message, "value"))
                     writer.uint32(/* id 3, wireType 1 =*/25).double(message.value);
                 if (message.threshold != null && Object.hasOwnProperty.call(message, "threshold"))
@@ -82531,10 +82474,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                     switch (tag >>> 3) {
                     case 1: {
                             message.name = reader.string();
-                            break;
-                        }
-                    case 2: {
-                            message.status_code = reader.int32();
                             break;
                         }
                     case 3: {
@@ -82599,9 +82538,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                 if (message.name != null && message.hasOwnProperty("name"))
                     if (!$util.isString(message.name))
                         return "name: string expected";
-                if (message.status_code != null && message.hasOwnProperty("status_code"))
-                    if (!$util.isInteger(message.status_code))
-                        return "status_code: integer expected";
                 if (message.value != null && message.hasOwnProperty("value"))
                     if (typeof message.value !== "number")
                         return "value: number expected";
@@ -82646,8 +82582,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                 let message = new $root.tabletmanagerdata.CheckThrottlerResponse.Metric();
                 if (object.name != null)
                     message.name = String(object.name);
-                if (object.status_code != null)
-                    message.status_code = object.status_code | 0;
                 if (object.value != null)
                     message.value = Number(object.value);
                 if (object.threshold != null)
@@ -82708,7 +82642,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                 let object = {};
                 if (options.defaults) {
                     object.name = "";
-                    object.status_code = 0;
                     object.value = 0;
                     object.threshold = 0;
                     object.error = "";
@@ -82718,8 +82651,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                 }
                 if (message.name != null && message.hasOwnProperty("name"))
                     object.name = message.name;
-                if (message.status_code != null && message.hasOwnProperty("status_code"))
-                    object.status_code = message.status_code;
                 if (message.value != null && message.hasOwnProperty("value"))
                     object.value = options.json && !isFinite(message.value) ? String(message.value) : message.value;
                 if (message.threshold != null && message.hasOwnProperty("threshold"))
@@ -84249,7 +84180,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
              * @memberof tabletmanagerdata.GetThrottlerStatusResponse
              * @interface IRecentApp
              * @property {vttime.ITime|null} [checked_at] RecentApp checked_at
-             * @property {number|null} [status_code] RecentApp status_code
              * @property {tabletmanagerdata.CheckThrottlerResponseCode|null} [response_code] RecentApp response_code
              */
 
@@ -84275,14 +84205,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
              * @instance
              */
             RecentApp.prototype.checked_at = null;
-
-            /**
-             * RecentApp status_code.
-             * @member {number} status_code
-             * @memberof tabletmanagerdata.GetThrottlerStatusResponse.RecentApp
-             * @instance
-             */
-            RecentApp.prototype.status_code = 0;
 
             /**
              * RecentApp response_code.
@@ -84318,8 +84240,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                     writer = $Writer.create();
                 if (message.checked_at != null && Object.hasOwnProperty.call(message, "checked_at"))
                     $root.vttime.Time.encode(message.checked_at, writer.uint32(/* id 1, wireType 2 =*/10).fork()).ldelim();
-                if (message.status_code != null && Object.hasOwnProperty.call(message, "status_code"))
-                    writer.uint32(/* id 2, wireType 0 =*/16).int32(message.status_code);
                 if (message.response_code != null && Object.hasOwnProperty.call(message, "response_code"))
                     writer.uint32(/* id 3, wireType 0 =*/24).int32(message.response_code);
                 return writer;
@@ -84358,10 +84278,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                     switch (tag >>> 3) {
                     case 1: {
                             message.checked_at = $root.vttime.Time.decode(reader, reader.uint32());
-                            break;
-                        }
-                    case 2: {
-                            message.status_code = reader.int32();
                             break;
                         }
                     case 3: {
@@ -84408,9 +84324,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                     if (error)
                         return "checked_at." + error;
                 }
-                if (message.status_code != null && message.hasOwnProperty("status_code"))
-                    if (!$util.isInteger(message.status_code))
-                        return "status_code: integer expected";
                 if (message.response_code != null && message.hasOwnProperty("response_code"))
                     switch (message.response_code) {
                     default:
@@ -84443,8 +84356,6 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                         throw TypeError(".tabletmanagerdata.GetThrottlerStatusResponse.RecentApp.checked_at: object expected");
                     message.checked_at = $root.vttime.Time.fromObject(object.checked_at);
                 }
-                if (object.status_code != null)
-                    message.status_code = object.status_code | 0;
                 switch (object.response_code) {
                 default:
                     if (typeof object.response_code === "number") {
@@ -84495,13 +84406,10 @@ export const tabletmanagerdata = $root.tabletmanagerdata = (() => {
                 let object = {};
                 if (options.defaults) {
                     object.checked_at = null;
-                    object.status_code = 0;
                     object.response_code = options.enums === String ? "UNDEFINED" : 0;
                 }
                 if (message.checked_at != null && message.hasOwnProperty("checked_at"))
                     object.checked_at = $root.vttime.Time.toObject(message.checked_at, options);
-                if (message.status_code != null && message.hasOwnProperty("status_code"))
-                    object.status_code = message.status_code;
                 if (message.response_code != null && message.hasOwnProperty("response_code"))
                     object.response_code = options.enums === String ? $root.tabletmanagerdata.CheckThrottlerResponseCode[message.response_code] === undefined ? message.response_code : $root.tabletmanagerdata.CheckThrottlerResponseCode[message.response_code] : message.response_code;
                 return object;
@@ -118595,6 +118503,7 @@ export const replicationdata = $root.replicationdata = (() => {
          * @property {boolean|null} [super_read_only] FullStatus super_read_only
          * @property {replicationdata.IConfiguration|null} [replication_configuration] FullStatus replication_configuration
          * @property {boolean|null} [disk_stalled] FullStatus disk_stalled
+         * @property {boolean|null} [semi_sync_blocked] FullStatus semi_sync_blocked
          */
 
         /**
@@ -118797,6 +118706,14 @@ export const replicationdata = $root.replicationdata = (() => {
         FullStatus.prototype.disk_stalled = false;
 
         /**
+         * FullStatus semi_sync_blocked.
+         * @member {boolean} semi_sync_blocked
+         * @memberof replicationdata.FullStatus
+         * @instance
+         */
+        FullStatus.prototype.semi_sync_blocked = false;
+
+        /**
          * Creates a new FullStatus instance using the specified properties.
          * @function create
          * @memberof replicationdata.FullStatus
@@ -118866,6 +118783,8 @@ export const replicationdata = $root.replicationdata = (() => {
                 $root.replicationdata.Configuration.encode(message.replication_configuration, writer.uint32(/* id 22, wireType 2 =*/178).fork()).ldelim();
             if (message.disk_stalled != null && Object.hasOwnProperty.call(message, "disk_stalled"))
                 writer.uint32(/* id 23, wireType 0 =*/184).bool(message.disk_stalled);
+            if (message.semi_sync_blocked != null && Object.hasOwnProperty.call(message, "semi_sync_blocked"))
+                writer.uint32(/* id 24, wireType 0 =*/192).bool(message.semi_sync_blocked);
             return writer;
         };
 
@@ -118992,6 +118911,10 @@ export const replicationdata = $root.replicationdata = (() => {
                         message.disk_stalled = reader.bool();
                         break;
                     }
+                case 24: {
+                        message.semi_sync_blocked = reader.bool();
+                        break;
+                    }
                 default:
                     reader.skipType(tag & 7);
                     break;
@@ -119102,6 +119025,9 @@ export const replicationdata = $root.replicationdata = (() => {
             if (message.disk_stalled != null && message.hasOwnProperty("disk_stalled"))
                 if (typeof message.disk_stalled !== "boolean")
                     return "disk_stalled: boolean expected";
+            if (message.semi_sync_blocked != null && message.hasOwnProperty("semi_sync_blocked"))
+                if (typeof message.semi_sync_blocked !== "boolean")
+                    return "semi_sync_blocked: boolean expected";
             return null;
         };
 
@@ -119179,6 +119105,8 @@ export const replicationdata = $root.replicationdata = (() => {
             }
             if (object.disk_stalled != null)
                 message.disk_stalled = Boolean(object.disk_stalled);
+            if (object.semi_sync_blocked != null)
+                message.semi_sync_blocked = Boolean(object.semi_sync_blocked);
             return message;
         };
 
@@ -119223,6 +119151,7 @@ export const replicationdata = $root.replicationdata = (() => {
                 object.super_read_only = false;
                 object.replication_configuration = null;
                 object.disk_stalled = false;
+                object.semi_sync_blocked = false;
             }
             if (message.server_id != null && message.hasOwnProperty("server_id"))
                 object.server_id = message.server_id;
@@ -119273,6 +119202,8 @@ export const replicationdata = $root.replicationdata = (() => {
                 object.replication_configuration = $root.replicationdata.Configuration.toObject(message.replication_configuration, options);
             if (message.disk_stalled != null && message.hasOwnProperty("disk_stalled"))
                 object.disk_stalled = message.disk_stalled;
+            if (message.semi_sync_blocked != null && message.hasOwnProperty("semi_sync_blocked"))
+                object.semi_sync_blocked = message.semi_sync_blocked;
             return object;
         };
 
@@ -126857,8 +126788,6 @@ export const vtctldata = $root.vtctldata = (() => {
                     return "strategy: enum value expected";
                 case 0:
                 case 0:
-                case 1:
-                case 2:
                 case 3:
                 case 4:
                     break;
@@ -127082,14 +127011,6 @@ export const vtctldata = $root.vtctldata = (() => {
             case "ONLINE":
             case 0:
                 message.strategy = 0;
-                break;
-            case "GHOST":
-            case 1:
-                message.strategy = 1;
-                break;
-            case "PTOSC":
-            case 2:
-                message.strategy = 2;
                 break;
             case "DIRECT":
             case 3:
@@ -127556,8 +127477,6 @@ export const vtctldata = $root.vtctldata = (() => {
          * @enum {number}
          * @property {number} VITESS=0 VITESS value
          * @property {number} ONLINE=0 ONLINE value
-         * @property {number} GHOST=1 GHOST value
-         * @property {number} PTOSC=2 PTOSC value
          * @property {number} DIRECT=3 DIRECT value
          * @property {number} MYSQL=4 MYSQL value
          */
@@ -127565,8 +127484,6 @@ export const vtctldata = $root.vtctldata = (() => {
             const valuesById = {}, values = Object.create(valuesById);
             values[valuesById[0] = "VITESS"] = 0;
             values["ONLINE"] = 0;
-            values[valuesById[1] = "GHOST"] = 1;
-            values[valuesById[2] = "PTOSC"] = 2;
             values[valuesById[3] = "DIRECT"] = 3;
             values[valuesById[4] = "MYSQL"] = 4;
             return values;
