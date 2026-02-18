@@ -17,7 +17,6 @@ limitations under the License.
 package tablethealthcheck
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -29,6 +28,7 @@ import (
 
 	"vitess.io/vitess/go/mysql"
 	"vitess.io/vitess/go/test/endtoend/cluster"
+	"vitess.io/vitess/go/vt/utils"
 )
 
 var (
@@ -107,13 +107,13 @@ func TestMain(m *testing.M) {
 			SchemaSQL: schemaSQL,
 			VSchema:   vSchema,
 		}
-		clusterInstance.VtTabletExtraArgs = append(clusterInstance.VtTabletExtraArgs, []string{"--health_check_interval", "1s"}...)
-		err = clusterInstance.StartKeyspace(*keyspace, shards, 0, false)
+		clusterInstance.VtTabletExtraArgs = append(clusterInstance.VtTabletExtraArgs, []string{utils.GetFlagVariantForTests("--health-check-interval"), "1s"}...)
+		err = clusterInstance.StartKeyspace(*keyspace, shards, 0, false, clusterInstance.Cell)
 		if err != nil {
 			return 1
 		}
 
-		clusterInstance.VtGateExtraArgs = append(clusterInstance.VtGateExtraArgs, []string{"--tablet_refresh_interval", tabletRefreshInterval.String()}...)
+		clusterInstance.VtGateExtraArgs = append(clusterInstance.VtGateExtraArgs, []string{utils.GetFlagVariantForTests("--tablet-refresh-interval"), tabletRefreshInterval.String()}...)
 		err = clusterInstance.StartVtgate()
 		if err != nil {
 			return 1
@@ -131,7 +131,7 @@ func TestMain(m *testing.M) {
 // TestHealthCheckExternallyReparentNewTablet ensures that calling TabletExternallyReparented on a new tablet will switch the primary tablet
 // without having to wait for the tabletRefreshInterval.
 func TestHealthCheckExternallyReparentNewTablet(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// verify output of `show vitess_tablets` and `INSERT` statement
 	vtgateConn, err := mysql.Connect(ctx, &vtParams)

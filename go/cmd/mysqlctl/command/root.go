@@ -17,7 +17,7 @@ limitations under the License.
 package command
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/spf13/cobra"
 
@@ -27,6 +27,7 @@ import (
 	"vitess.io/vitess/go/vt/dbconfigs"
 	"vitess.io/vitess/go/vt/logutil"
 	"vitess.io/vitess/go/vt/servenv"
+	"vitess.io/vitess/go/vt/utils"
 )
 
 var (
@@ -48,7 +49,7 @@ var (
 			}
 
 			if vtcmd.IsRunningAsRoot() {
-				return fmt.Errorf("mysqlctl cannot be run as root. Please run as a different user")
+				return errors.New("mysqlctl cannot be run as root. Please run as a different user")
 			}
 
 			return nil
@@ -70,9 +71,9 @@ func init() {
 
 	servenv.MovePersistentFlagsToCobraCommand(Root)
 
-	Root.PersistentFlags().IntVar(&mysqlPort, "mysql_port", mysqlPort, "MySQL port.")
-	Root.PersistentFlags().Uint32Var(&tabletUID, "tablet_uid", tabletUID, "Tablet UID.")
-	Root.PersistentFlags().StringVar(&mysqlSocket, "mysql_socket", mysqlSocket, "Path to the mysqld socket file.")
+	utils.SetFlagIntVar(Root.PersistentFlags(), &mysqlPort, "mysql-port", mysqlPort, "MySQL port.")
+	utils.SetFlagUint32Var(Root.PersistentFlags(), &tabletUID, "tablet-uid", tabletUID, "Tablet UID.")
+	utils.SetFlagStringVar(Root.PersistentFlags(), &mysqlSocket, "mysql-socket", mysqlSocket, "Path to the mysqld socket file.")
 
 	acl.RegisterFlags(Root.PersistentFlags())
 

@@ -22,8 +22,14 @@ import (
 	"github.com/spf13/pflag"
 
 	"vitess.io/vitess/go/viperutil"
+	vtorcdatapb "vitess.io/vitess/go/vt/proto/vtorcdata"
 	"vitess.io/vitess/go/vt/servenv"
 )
+
+// DefaultKeyspaceTopoConfig is the default topo-based VTOrc config for a keyspace.
+var DefaultKeyspaceTopoConfig = &vtorcdatapb.Keyspace{
+	DisableEmergencyReparent: false,
+}
 
 var configurationLoaded = make(chan bool)
 
@@ -32,14 +38,20 @@ const (
 	AuditPageSize                         = 20
 	DebugMetricsIntervalSeconds           = 10
 	StaleInstanceCoordinatesExpireSeconds = 60
-	DiscoveryMaxConcurrency               = 300 // Number of goroutines doing hosts discovery
 	DiscoveryQueueCapacity                = 100000
-	DiscoveryQueueMaxStatisticsSize       = 120
-	DiscoveryCollectionRetentionSeconds   = 120
 	UnseenInstanceForgetHours             = 240 // Number of hours after which an unseen instance is forgotten
 )
 
 var (
+	cell = viperutil.Configure(
+		"cell",
+		viperutil.Options[string]{
+			FlagName: "cell",
+			Default:  "",
+			Dynamic:  true,
+		},
+	)
+
 	instancePollTime = viperutil.Configure(
 		"instance-poll-time",
 		viperutil.Options[time.Duration]{
@@ -55,6 +67,15 @@ var (
 			FlagName: "prevent-cross-cell-failover",
 			Default:  false,
 			Dynamic:  true,
+		},
+	)
+
+	discoveryWorkers = viperutil.Configure(
+		"discovery-workers",
+		viperutil.Options[int]{
+			FlagName: "discovery-workers",
+			Default:  300,
+			Dynamic:  false,
 		},
 	)
 
@@ -121,6 +142,24 @@ var (
 		},
 	)
 
+	backendReadConcurrency = viperutil.Configure(
+		"backend-read-concurrency",
+		viperutil.Options[int64]{
+			FlagName: "backend-read-concurrency",
+			Default:  32,
+			Dynamic:  false,
+		},
+	)
+
+	backendWriteConcurrency = viperutil.Configure(
+		"backend-write-concurrency",
+		viperutil.Options[int64]{
+			FlagName: "backend-write-concurrency",
+			Default:  24,
+			Dynamic:  false,
+		},
+	)
+
 	waitReplicasTimeout = viperutil.Configure(
 		"wait-replicas-timeout",
 		viperutil.Options[time.Duration]{
@@ -166,6 +205,15 @@ var (
 		},
 	)
 
+	allowRecovery = viperutil.Configure(
+		"allow-recovery",
+		viperutil.Options[bool]{
+			FlagName: "allow-recovery",
+			Default:  true,
+			Dynamic:  true,
+		},
+	)
+
 	convertTabletsWithErrantGTIDs = viperutil.Configure(
 		"change-tablets-with-errant-gtid-to-drained",
 		viperutil.Options[bool]{
@@ -191,6 +239,8 @@ func init() {
 
 // registerFlags registers the flags required by VTOrc
 func registerFlags(fs *pflag.FlagSet) {
+	fs.Int("discovery-workers", discoveryWorkers.Default(), "Number of workers used for tablet discovery")
+	fs.String("cell", cell.Default(), "cell to use (required in v25+)")
 	fs.String("sqlite-data-file", sqliteDataFile.Default(), "SQLite Datafile to use as VTOrc's database")
 	fs.Duration("instance-poll-time", instancePollTime.Default(), "Timer duration on which VTOrc refreshes MySQL information")
 	fs.Duration("snapshot-topology-interval", snapshotTopologyInterval.Default(), "Timer duration on which VTOrc takes a snapshot of the current MySQL information it has in the database. Should be in multiple of hours")
@@ -199,18 +249,23 @@ func registerFlags(fs *pflag.FlagSet) {
 	fs.Bool("audit-to-backend", auditToBackend.Default(), "Whether to store the audit log in the VTOrc database")
 	fs.Bool("audit-to-syslog", auditToSyslog.Default(), "Whether to store the audit log in the syslog")
 	fs.Duration("audit-purge-duration", auditPurgeDuration.Default(), "Duration for which audit logs are held before being purged. Should be in multiples of days")
+	fs.Int64("backend-read-concurrency", backendReadConcurrency.Default(), "Maximum concurrency for reads to the backend")
+	fs.Int64("backend-write-concurrency", backendWriteConcurrency.Default(), "Maximum concurrency for writes to the backend")
 	fs.Bool("prevent-cross-cell-failover", preventCrossCellFailover.Default(), "Prevent VTOrc from promoting a primary in a different cell than the current primary in case of a failover")
 	fs.Duration("wait-replicas-timeout", waitReplicasTimeout.Default(), "Duration for which to wait for replica's to respond when issuing RPCs")
 	fs.Duration("tolerable-replication-lag", tolerableReplicationLag.Default(), "Amount of replication lag that is considered acceptable for a tablet to be eligible for promotion when Vitess makes the choice of a new primary in PRS")
 	fs.Duration("topo-information-refresh-duration", topoInformationRefreshDuration.Default(), "Timer duration on which VTOrc refreshes the keyspace and vttablet records from the topology server")
 	fs.Duration("recovery-poll-duration", recoveryPollDuration.Default(), "Timer duration on which VTOrc polls its database to run a recovery")
 	fs.Bool("allow-emergency-reparent", ersEnabled.Default(), "Whether VTOrc should be allowed to run emergency reparent operation when it detects a dead primary")
+	fs.Bool("allow-recovery", allowRecovery.Default(), "Whether VTOrc should be allowed to run recovery actions")
 	fs.Bool("change-tablets-with-errant-gtid-to-drained", convertTabletsWithErrantGTIDs.Default(), "Whether VTOrc should be changing the type of tablets with errant GTIDs to DRAINED")
 	fs.Bool("enable-primary-disk-stalled-recovery", enablePrimaryDiskStalledRecovery.Default(), "Whether VTOrc should detect a stalled disk on the primary and failover")
 
 	viperutil.BindFlags(fs,
+		cell,
 		instancePollTime,
 		preventCrossCellFailover,
+		discoveryWorkers,
 		sqliteDataFile,
 		snapshotTopologyInterval,
 		reasonableReplicationLag,
@@ -218,14 +273,22 @@ func registerFlags(fs *pflag.FlagSet) {
 		auditToBackend,
 		auditToSyslog,
 		auditPurgeDuration,
+		backendReadConcurrency,
+		backendWriteConcurrency,
 		waitReplicasTimeout,
 		tolerableReplicationLag,
 		topoInformationRefreshDuration,
 		recoveryPollDuration,
 		ersEnabled,
+		allowRecovery,
 		convertTabletsWithErrantGTIDs,
 		enablePrimaryDiskStalledRecovery,
 	)
+}
+
+// GetCell is a getter function.
+func GetCell() string {
+	return cell.Get()
 }
 
 // GetInstancePollTime is a getter function.
@@ -246,6 +309,11 @@ func GetInstancePollSeconds() uint {
 // GetPreventCrossCellFailover is a getter function.
 func GetPreventCrossCellFailover() bool {
 	return preventCrossCellFailover.Get()
+}
+
+// GetDiscoveryWorkers is a getter function.
+func GetDiscoveryWorkers() uint {
+	return uint(discoveryWorkers.Get())
 }
 
 // GetSQLiteDataFile is a getter function.
@@ -303,6 +371,16 @@ func SetAuditPurgeDays(days int64) {
 	auditPurgeDuration.Set(time.Duration(days) * 24 * time.Hour)
 }
 
+// GetBackendReadConcurrency returns the max backend read concurrency.
+func GetBackendReadConcurrency() int64 {
+	return backendReadConcurrency.Get()
+}
+
+// GetBackendWriteConcurrency returns the max backend write concurrency.
+func GetBackendWriteConcurrency() int64 {
+	return backendWriteConcurrency.Get()
+}
+
 // GetWaitReplicasTimeout is a getter function.
 func GetWaitReplicasTimeout() time.Duration {
 	return waitReplicasTimeout.Get()
@@ -331,6 +409,11 @@ func ERSEnabled() bool {
 // SetERSEnabled sets the value for the ersEnabled variable. This should only be used from tests.
 func SetERSEnabled(val bool) {
 	ersEnabled.Set(val)
+}
+
+// GetAllowRecovery is a getter function.
+func GetAllowRecovery() bool {
+	return allowRecovery.Get()
 }
 
 // ConvertTabletWithErrantGTIDs reports whether VTOrc is allowed to change the tablet type of tablets with errant GTIDs to DRAINED.

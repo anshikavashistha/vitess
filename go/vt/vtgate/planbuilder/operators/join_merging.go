@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"vitess.io/vitess/go/vt/sqlparser"
+	"vitess.io/vitess/go/vt/vtgate/engine"
 	"vitess.io/vitess/go/vt/vtgate/planbuilder/plancontext"
 	"vitess.io/vitess/go/vt/vtgate/vindexes"
 )
@@ -27,9 +28,10 @@ import (
 // mergeJoinInputs checks whether two operators can be merged into a single one.
 // If they can be merged, a new operator with the merged routing is returned
 // If they cannot be merged, nil is returned.
-func (jm *joinMerger) mergeJoinInputs(ctx *plancontext.PlanningContext, lhs, rhs Operator, joinPredicates []sqlparser.Expr) *Route {
+func (jm *joinMerger) mergeJoinInputs(ctx *plancontext.PlanningContext, lhs, rhs Operator) *Route {
 	lhsRoute, rhsRoute, routingA, routingB, a, b, sameKeyspace := prepareInputRoutes(ctx, lhs, rhs)
 	if lhsRoute == nil {
+		debugNoRewrite("apply join merge blocked: LHS or RHS is not a Route")
 		return nil
 	}
 
@@ -37,16 +39,20 @@ func (jm *joinMerger) mergeJoinInputs(ctx *plancontext.PlanningContext, lhs, rhs
 	// We clone the right hand side and try and push all the join predicates that are solved entirely by that side.
 	// If a dual is on the left side, and it is a left join (all right joins are changed to left joins), then we can only merge if the right side is a single sharded routing.
 	case a == dual:
-		rhsClone := Clone(rhs).(*Route)
-		for _, predicate := range joinPredicates {
-			if ctx.SemTable.DirectDeps(predicate).IsSolvedBy(TableID(rhsClone)) {
-				rhsClone.AddPredicate(ctx, predicate)
+		newRouting := rhsRoute.Routing.Clone()
+
+		rhsID := TableID(rhsRoute)
+		for _, predicate := range jm.predicates {
+			if ctx.SemTable.DirectDeps(predicate).IsSolvedBy(rhsID) {
+				newRouting = UpdateRoutingLogic(ctx, predicate, newRouting)
 			}
 		}
-		if !jm.joinType.IsInner() && !rhsClone.Routing.OpCode().IsSingleShard() {
+
+		if !jm.joinType.IsInner() && !newRouting.OpCode().IsSingleShard() {
+			debugNoRewrite("apply join merge blocked: dual routing with non-inner join type %s and multi-shard routing %s", jm.joinType.ToString(), newRouting.OpCode().String())
 			return nil
 		}
-		return jm.merge(ctx, lhsRoute, rhsClone, rhsClone.Routing)
+		return jm.merge(ctx, lhsRoute, rhsRoute, newRouting)
 
 	// If a dual is on the right side.
 	case b == dual:
@@ -54,7 +60,7 @@ func (jm *joinMerger) mergeJoinInputs(ctx *plancontext.PlanningContext, lhs, rhs
 
 	// As both are reference route. We need to merge the alternates as well.
 	case a == anyShard && b == anyShard && sameKeyspace:
-		newrouting := mergeAnyShardRoutings(ctx, routingA.(*AnyShardRouting), routingB.(*AnyShardRouting), joinPredicates, jm.joinType)
+		newrouting := mergeAnyShardRoutings(ctx, routingA.(*AnyShardRouting), routingB.(*AnyShardRouting), jm.predicates, jm.joinType)
 		return jm.merge(ctx, lhsRoute, rhsRoute, newrouting)
 
 	// an unsharded/reference route can be merged with anything going to that keyspace
@@ -71,13 +77,27 @@ func (jm *joinMerger) mergeJoinInputs(ctx *plancontext.PlanningContext, lhs, rhs
 
 	// infoSchema routing is complex, so we handle it in a separate method
 	case a == infoSchema && b == infoSchema:
-		return tryMergeInfoSchemaRoutings(ctx, routingA, routingB, jm, lhsRoute, rhsRoute)
+		result := tryMergeInfoSchemaRoutings(ctx, routingA, routingB, jm, lhsRoute, rhsRoute)
+		if result == nil {
+			debugNoRewrite("apply join merge blocked: info schema routing merge failed")
+		}
+		return result
 
 	// sharded routing is complex, so we handle it in a separate method
 	case a == sharded && b == sharded:
-		return tryMergeShardedRouting(ctx, lhsRoute, rhsRoute, jm, joinPredicates)
+		result := tryMergeShardedRouting(ctx, lhsRoute, rhsRoute, jm, jm.predicates)
+		if result == nil {
+			debugNoRewrite("apply join merge blocked: sharded routing merge failed (different keyspaces or incompatible vindex predicates)")
+		}
+		return result
 
 	default:
+		if !sameKeyspace {
+			debugNoRewrite("apply join merge blocked: routes target different keyspaces (LHS: %s %s, RHS: %s %s)",
+				a.String(), getKeyspaceName(routingA), b.String(), getKeyspaceName(routingB))
+		} else {
+			debugNoRewrite("apply join merge blocked: incompatible routing types (LHS: %s, RHS: %s)", a.String(), b.String())
+		}
 		return nil
 	}
 }
@@ -116,8 +136,8 @@ func prepareInputRoutes(ctx *plancontext.PlanningContext, lhs Operator, rhs Oper
 
 type (
 	merger interface {
-		mergeShardedRouting(ctx *plancontext.PlanningContext, r1, r2 *ShardedRouting, op1, op2 *Route) *Route
-		merge(ctx *plancontext.PlanningContext, op1, op2 *Route, r Routing) *Route
+		mergeShardedRouting(ctx *plancontext.PlanningContext, r1, r2 *ShardedRouting, op1, op2 *Route, conditions ...engine.Condition) *Route
+		merge(ctx *plancontext.PlanningContext, op1, op2 *Route, r Routing, conditions ...engine.Condition) *Route
 	}
 
 	joinMerger struct {
@@ -215,8 +235,8 @@ func newJoinMerge(predicates []sqlparser.Expr, joinType sqlparser.JoinType) *joi
 	}
 }
 
-func (jm *joinMerger) mergeShardedRouting(ctx *plancontext.PlanningContext, r1, r2 *ShardedRouting, op1, op2 *Route) *Route {
-	return jm.merge(ctx, op1, op2, mergeShardedRouting(r1, r2))
+func (jm *joinMerger) mergeShardedRouting(ctx *plancontext.PlanningContext, r1, r2 *ShardedRouting, op1, op2 *Route, conditions ...engine.Condition) *Route {
+	return jm.merge(ctx, op1, op2, mergeShardedRouting(r1, r2), conditions...)
 }
 
 func mergeShardedRouting(r1 *ShardedRouting, r2 *ShardedRouting) *ShardedRouting {
@@ -234,14 +254,24 @@ func mergeShardedRouting(r1 *ShardedRouting, r2 *ShardedRouting) *ShardedRouting
 	return tr
 }
 
-func (jm *joinMerger) getApplyJoin(ctx *plancontext.PlanningContext, op1, op2 *Route) *ApplyJoin {
-	return NewApplyJoin(ctx, op1.Source, op2.Source, ctx.SemTable.AndExpressions(jm.predicates...), jm.joinType)
+func getKeyspaceName(routing Routing) string {
+	if ks := routing.Keyspace(); ks != nil {
+		return ks.Name
+	}
+	return "<unknown>"
 }
 
-func (jm *joinMerger) merge(ctx *plancontext.PlanningContext, op1, op2 *Route, r Routing) *Route {
+func (jm *joinMerger) merge(ctx *plancontext.PlanningContext, op1, op2 *Route, r Routing, conditions ...engine.Condition) *Route {
+	aj := NewApplyJoin(ctx, op1.Source, op2.Source, ctx.SemTable.AndExpressions(jm.predicates...), jm.joinType, false)
+	for _, column := range aj.JoinPredicates.columns {
+		if column.JoinPredicateID != nil {
+			ctx.PredTracker.Set(*column.JoinPredicateID, column.Original)
+		}
+	}
 	return &Route{
-		unaryOperator: newUnaryOp(jm.getApplyJoin(ctx, op1, op2)),
+		unaryOperator: newUnaryOp(aj),
 		MergedWith:    []*Route{op2},
 		Routing:       r,
+		Conditions:    conditions,
 	}
 }

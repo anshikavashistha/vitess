@@ -33,6 +33,7 @@ import (
 	"vitess.io/vitess/go/test/endtoend/recovery"
 	"vitess.io/vitess/go/test/endtoend/utils"
 	"vitess.io/vitess/go/vt/log"
+	vtutils "vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vtgate/vtgateconn"
 )
 
@@ -51,11 +52,12 @@ var (
 	dbCredentialFile string
 	shardName        = "0"
 	commonTabletArg  = []string{
-		"--vreplication_retry_delay", "1s",
-		"--degraded_threshold", "5s",
-		"--lock_tables_timeout", "5s",
-		"--watch_replication_stream",
-		"--serving_state_grace_period", "1s"}
+		"--vreplication-retry-delay", "1s",
+		vtutils.GetFlagVariantForTests("--degraded-threshold"), "5s",
+		vtutils.GetFlagVariantForTests("--lock-tables-timeout"), "5s",
+		vtutils.GetFlagVariantForTests("--watch-replication-stream"),
+		vtutils.GetFlagVariantForTests("--serving-state-grace-period"), "1s",
+	}
 	recoveryKS1  = "recovery_ks1"
 	recoveryKS2  = "recovery_ks2"
 	vtInsertTest = `create table vt_insert_test (
@@ -103,7 +105,7 @@ func TestMainImpl(m *testing.M) {
 			return 1, err
 		}
 		newInitDBFile = path.Join(localCluster.TmpDirectory, "init_db_with_passwords.sql")
-		os.WriteFile(newInitDBFile, []byte(sql), 0666)
+		os.WriteFile(newInitDBFile, []byte(sql), 0o666)
 
 		extraArgs := []string{"--db-credentials-file", dbCredentialFile}
 		commonTabletArg = append(commonTabletArg, "--db-credentials-file", dbCredentialFile)
@@ -113,7 +115,7 @@ func TestMainImpl(m *testing.M) {
 		}
 
 		var mysqlProcs []*exec.Cmd
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			tabletType := "replica"
 			if i == 0 {
 				tabletType = "primary"
@@ -166,7 +168,7 @@ func TestMainImpl(m *testing.M) {
 		if err := localCluster.VtctldClientProcess.InitializeShard(keyspaceName, shard.Name, cell, primary.TabletUID); err != nil {
 			return 1, err
 		}
-		if err := localCluster.StartVTOrc(keyspaceName); err != nil {
+		if err := localCluster.StartVTOrc(cell, keyspaceName); err != nil {
 			return 1, err
 		}
 		return m.Run(), nil
@@ -178,7 +180,6 @@ func TestMainImpl(m *testing.M) {
 	} else {
 		os.Exit(exitCode)
 	}
-
 }
 
 // TestRecoveryImpl does following
@@ -288,7 +289,7 @@ func TestRecoveryImpl(t *testing.T) {
 	// only one row from first backup
 	cluster.VerifyRowsInTablet(t, replica3, keyspaceName, 1)
 
-	//verify that restored replica has value = test1
+	// verify that restored replica has value = test1
 	qr, err = replica3.VttabletProcess.QueryTablet("select msg from vt_insert_test where id = 1", keyspaceName, true)
 	assert.NoError(t, err)
 	assert.Equal(t, "test1", qr.Rows[0][0].ToString())

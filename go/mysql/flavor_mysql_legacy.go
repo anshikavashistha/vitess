@@ -46,9 +46,11 @@ type mysqlFlavor8Legacy struct {
 	mysqlFlavorLegacy
 }
 
-var _ flavor = (*mysqlFlavor57)(nil)
-var _ flavor = (*mysqlFlavor8Legacy)(nil)
-var _ flavor = (*mysqlFlavor8)(nil)
+var (
+	_ flavor = (*mysqlFlavor57)(nil)
+	_ flavor = (*mysqlFlavor8Legacy)(nil)
+	_ flavor = (*mysqlFlavor8)(nil)
+)
 
 // TablesWithSize56 is a query to select table along with size for mysql 5.6
 const TablesWithSize56 = `SELECT table_name,
@@ -212,7 +214,7 @@ func (mysqlFlavorLegacy) catchupToGTIDCommands(params *ConnParams, replPos repli
 		cmds = append(cmds, cmd+";")
 	} else {
 		// No TLS
-		cmds = append(cmds, fmt.Sprintf("CHANGE MASTER TO MASTER_HOST='%s', MASTER_PORT=%d, MASTER_USER='%s', MASTER_PASSWORD='%s', MASTER_AUTO_POSITION=1;", params.Host, params.Port, params.Uname, params.Pass))
+		cmds = append(cmds, fmt.Sprintf("CHANGE MASTER TO MASTER_HOST='%s', MASTER_PORT=%d, MASTER_USER='%s', MASTER_PASSWORD='%s', GET_MASTER_PUBLIC_KEY=1, MASTER_AUTO_POSITION=1;", params.Host, params.Port, params.Uname, params.Pass))
 	}
 
 	if replPos.IsZero() { // when the there is no afterPos, that means need to replicate completely
@@ -233,6 +235,8 @@ func (mysqlFlavorLegacy) setReplicationSourceCommand(params *ConnParams, host st
 	}
 	if params.SslEnabled() {
 		args = append(args, "MASTER_SSL = 1")
+	} else {
+		args = append(args, "GET_MASTER_PUBLIC_KEY = 1")
 	}
 	if params.SslCa != "" {
 		args = append(args, fmt.Sprintf("MASTER_SSL_CA = '%s'", params.SslCa))

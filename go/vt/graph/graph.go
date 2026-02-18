@@ -66,9 +66,11 @@ func (gr *Graph[C]) PrintGraph() string {
 	adjacencyLists := []string{}
 	for vertex, edges := range gr.edges {
 		adjacencyList := fmt.Sprintf("%v -", vertex)
+		var adjacencyListSb69 strings.Builder
 		for _, end := range edges {
-			adjacencyList += fmt.Sprintf(" %v", end)
+			adjacencyListSb69.WriteString(fmt.Sprintf(" %v", end))
 		}
+		adjacencyList += adjacencyListSb69.String()
 		adjacencyLists = append(adjacencyLists, adjacencyList)
 	}
 	slices.Sort(adjacencyLists)
@@ -144,11 +146,12 @@ func (gr *Graph[C]) hasCyclesDfs(color map[C]int, vertex C) (bool, []C) {
 	// Go over all the edges.
 	for _, end := range gr.edges[vertex] {
 		// If we encounter a white vertex, we continue the dfs.
-		if color[end] == white {
+		switch color[end] {
+		case white:
 			if hasCycle, cycle := gr.hasCyclesDfs(color, end); hasCycle {
 				return true, append(result, cycle...)
 			}
-		} else if color[end] == grey {
+		case grey:
 			// We encountered a grey vertex, we have a cycle.
 			return true, append(result, end)
 		}

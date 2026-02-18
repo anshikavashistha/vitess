@@ -23,7 +23,9 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"fmt"
 	"net"
+	"os"
 	"sync"
 
 	"vitess.io/vitess/go/mysql/sqlerror"
@@ -277,10 +279,10 @@ func ScrambleMysqlNativePassword(salt, password []byte) []byte {
 	return scramble
 }
 
-// DecodeMysqlNativePasswordHex decodes the standard format used by MySQL
+// DecodePasswordHex decodes the standard format used by MySQL
 // for 4.1 style password hashes. It drops the optionally leading * before
 // decoding the rest as a hex encoded string.
-func DecodeMysqlNativePasswordHex(hexEncodedPassword string) ([]byte, error) {
+func DecodePasswordHex(hexEncodedPassword string) ([]byte, error) {
 	if hexEncodedPassword[0] == '*' {
 		hexEncodedPassword = hexEncodedPassword[1:]
 	}
@@ -294,7 +296,7 @@ func DecodeMysqlNativePasswordHex(hexEncodedPassword string) ([]byte, error) {
 //
 // All values here are non encoded byte slices, so if you store for example the double
 // SHA1 of the password as hex encoded characters, you need to decode that first.
-// See DecodeMysqlNativePasswordHex for a decoding helper for the standard encoding
+// See DecodePasswordHex for a decoding helper for the standard encoding
 // format of this hash used by MySQL.
 func VerifyHashedMysqlNativePassword(reply, salt, hashedNativePassword []byte) bool {
 	if len(reply) == 0 || len(hashedNativePassword) == 0 {
@@ -525,7 +527,6 @@ func (n *mysqlCachingSha2AuthMethod) HandleAuthPluginData(c *Conn, user string, 
 
 	salt := serverAuthPluginData[:len(serverAuthPluginData)-1]
 	result, cacheState, err := n.cache.UserEntryWithCacheHash(c, salt, user, clientAuthPluginData, remoteAddr)
-
 	if err != nil {
 		return nil, err
 	}
@@ -578,18 +579,20 @@ func RegisterAuthServer(name string, authServer AuthServer) {
 	mu.Lock()
 	defer mu.Unlock()
 	if _, ok := authServers[name]; ok {
-		log.Fatalf("AuthServer named %v already exists", name)
+		log.Error(fmt.Sprintf("AuthServer named %v already exists", name))
+		os.Exit(1)
 	}
 	authServers[name] = authServer
 }
 
-// GetAuthServer returns an AuthServer by name, or log.Exitf.
+// GetAuthServer returns an AuthServer by name, or exits the process.
 func GetAuthServer(name string) AuthServer {
 	mu.Lock()
 	defer mu.Unlock()
 	authServer, ok := authServers[name]
 	if !ok {
-		log.Exitf("no AuthServer name %v registered", name)
+		log.Error(fmt.Sprintf("no AuthServer name %v registered", name))
+		os.Exit(1)
 	}
 	return authServer
 }

@@ -169,6 +169,38 @@ func TestTrackerGetKeyspaceUpdateController(t *testing.T) {
 	assert.Nil(t, ks3.reloadKeyspace, "ks3 already initialized")
 }
 
+// TestTrackerNoLock tests that processing of health check is not blocked while tracking is making GetSchema rpc calls.
+func TestTrackerNoLock(t *testing.T) {
+	ch := make(chan *discovery.TabletHealth)
+	tracker := NewTracker(ch, true, false, sqlparser.NewTestParser())
+	tracker.consumeDelay = 1 * time.Millisecond
+	tracker.Start()
+	defer tracker.Stop()
+
+	target := &querypb.Target{Cell: cell, Keyspace: keyspace, Shard: "-80", TabletType: topodatapb.TabletType_PRIMARY}
+	tablet := &topodatapb.Tablet{Keyspace: target.Keyspace, Shard: target.Shard, Type: target.TabletType}
+
+	sbc := sandboxconn.NewSandboxConn(tablet)
+	sbc.GetSchemaDelayResponse = 100 * time.Millisecond
+
+	th := &discovery.TabletHealth{
+		Conn:    sbc,
+		Tablet:  tablet,
+		Target:  target,
+		Serving: true,
+		Stats:   &querypb.RealtimeStats{TableSchemaChanged: []string{"t1"}},
+	}
+
+	for range 500000 {
+		select {
+		case ch <- th:
+		case <-time.After(50 * time.Millisecond):
+			t.Fatalf("failed to send health check to tracker")
+		}
+	}
+	require.GreaterOrEqual(t, sbc.GetSchemaCount.Load(), int64(1), "GetSchema rpc should be called")
+}
+
 type myTable struct {
 	name, create string
 }
@@ -270,21 +302,24 @@ func TestViewsTracking(t *testing.T) {
 	testcases := []testCases{{
 		testName: "initial view load",
 		expView: map[string]string{
-			"prior": "select 1 from ks.tbl"},
+			"prior": "select 1 from ks.tbl",
+		},
 	}, {
 		testName: "new view t1, V1",
 		updView:  []string{"t1", "V1"},
 		expView: map[string]string{
 			"t1":    "select 1 from ks.tbl1",
 			"V1":    "select 1 from ks.tbl2",
-			"prior": "select 1 from ks.tbl"},
+			"prior": "select 1 from ks.tbl",
+		},
 	}, {
 		testName: "delete prior, updated V1 and new t3",
 		updView:  []string{"prior", "V1", "t3"},
 		expView: map[string]string{
 			"t1": "select 1 from ks.tbl1",
 			"V1": "select 1, 2 from ks.tbl2",
-			"t3": "select 1 from ks.tbl3"},
+			"t3": "select 1 from ks.tbl3",
+		},
 	}, {
 		testName: "new t4",
 		updView:  []string{"t4"},
@@ -292,7 +327,8 @@ func TestViewsTracking(t *testing.T) {
 			"t1": "select 1 from ks.tbl1",
 			"V1": "select 1, 2 from ks.tbl2",
 			"t3": "select 1 from ks.tbl3",
-			"t4": "select 1 from ks.tbl4"},
+			"t4": "select 1 from ks.tbl4",
+		},
 	}, {
 		testName: "new broken t5",
 		updView:  []string{"t5"},
@@ -300,7 +336,8 @@ func TestViewsTracking(t *testing.T) {
 			"t1": "select 1 from ks.tbl1",
 			"V1": "select 1, 2 from ks.tbl2",
 			"t3": "select 1 from ks.tbl3",
-			"t4": "select 1 from ks.tbl4"},
+			"t4": "select 1 from ks.tbl4",
+		},
 	}}
 
 	testTracker(t, false, schemaDefResult, testcases)
@@ -440,7 +477,8 @@ func TestUDFRetrieval(t *testing.T) {
 		udfs(
 			udf("my_udf2", true, sqltypes.Char),
 			udf("my_udf4", true, sqltypes.Int32),
-		)}
+		),
+	}
 
 	testcases := []testCases{{
 		testName: "initial load",

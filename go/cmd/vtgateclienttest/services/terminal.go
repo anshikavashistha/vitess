@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	"vitess.io/vitess/go/vt/vtgate/vtgateservice"
 
@@ -43,9 +44,17 @@ func newTerminalClient() *terminalClient {
 	return &terminalClient{}
 }
 
-func (c *terminalClient) Execute(ctx context.Context, mysqlCtx vtgateservice.MySQLConnection, session *vtgatepb.Session, sql string, bindVariables map[string]*querypb.BindVariable) (*vtgatepb.Session, *sqltypes.Result, error) {
+func (c *terminalClient) Execute(
+	ctx context.Context,
+	mysqlCtx vtgateservice.MySQLConnection,
+	session *vtgatepb.Session,
+	sql string,
+	bindVariables map[string]*querypb.BindVariable,
+	prepared bool,
+) (*vtgatepb.Session, *sqltypes.Result, error) {
 	if sql == "quit://" {
-		log.Fatal("Received quit:// query. Going down.")
+		log.Error("Received quit:// query. Going down.")
+		os.Exit(1)
 	}
 	return session, nil, errTerminal
 }
@@ -53,7 +62,8 @@ func (c *terminalClient) Execute(ctx context.Context, mysqlCtx vtgateservice.MyS
 func (c *terminalClient) ExecuteBatch(ctx context.Context, session *vtgatepb.Session, sqlList []string, bindVariablesList []map[string]*querypb.BindVariable) (*vtgatepb.Session, []sqltypes.QueryResponse, error) {
 	if len(sqlList) == 1 {
 		if sqlList[0] == "quit://" {
-			log.Fatal("Received quit:// query. Going down.")
+			log.Error("Received quit:// query. Going down.")
+			os.Exit(1)
 		}
 	}
 	return session, nil, errTerminal
@@ -63,8 +73,16 @@ func (c *terminalClient) StreamExecute(ctx context.Context, mysqlCtx vtgateservi
 	return session, errTerminal
 }
 
-func (c *terminalClient) Prepare(ctx context.Context, session *vtgatepb.Session, sql string, bindVariables map[string]*querypb.BindVariable) (*vtgatepb.Session, []*querypb.Field, error) {
+func (c *terminalClient) Prepare(ctx context.Context, session *vtgatepb.Session, sql string) (*vtgatepb.Session, []*querypb.Field, uint16, error) {
+	return session, nil, 0, errTerminal
+}
+
+func (c *terminalClient) ExecuteMulti(ctx context.Context, mysqlCtx vtgateservice.MySQLConnection, session *vtgatepb.Session, sqlString string) (newSession *vtgatepb.Session, qrs []*sqltypes.Result, err error) {
 	return session, nil, errTerminal
+}
+
+func (c *terminalClient) StreamExecuteMulti(ctx context.Context, mysqlCtx vtgateservice.MySQLConnection, session *vtgatepb.Session, sqlString string, callback func(qr sqltypes.QueryResponse, more bool, firstPacket bool) error) (*vtgatepb.Session, error) {
+	return session, errTerminal
 }
 
 func (c *terminalClient) CloseSession(ctx context.Context, session *vtgatepb.Session) error {
@@ -77,7 +95,7 @@ func (c *terminalClient) VStream(ctx context.Context, tabletType topodatapb.Tabl
 
 func (c *terminalClient) HandlePanic(err *error) {
 	if x := recover(); x != nil {
-		log.Errorf("Uncaught panic:\n%v\n%s", x, tb.Stack(4))
+		log.Error(fmt.Sprintf("Uncaught panic:\n%v\n%s", x, tb.Stack(4)))
 		*err = fmt.Errorf("uncaught panic: %v", x)
 	}
 }

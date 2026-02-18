@@ -61,6 +61,10 @@ type noopVCursor struct {
 	inTx bool
 }
 
+func (t *noopVCursor) GetExecutionMetrics() *Metrics {
+	panic("implement me")
+}
+
 func (t *noopVCursor) SetExecQueryTimeout(timeout *int) {
 	panic("implement me")
 }
@@ -149,7 +153,7 @@ func (t *noopVCursor) ShowExec(ctx context.Context, command sqlparser.ShowComman
 }
 
 // SetContextWithValue implements VCursor interface.
-func (t *noopVCursor) SetContextWithValue(key, value interface{}) func() {
+func (t *noopVCursor) SetContextWithValue(key, value any) func() {
 	return func() {}
 }
 
@@ -263,6 +267,10 @@ func (t *noopVCursor) SetFoundRows(u uint64) {
 	panic("implement me")
 }
 
+func (t *noopVCursor) SetInDMLExecution(inDMLExec bool) {
+	panic("implement me")
+}
+
 func (t *noopVCursor) InTransactionAndIsDML() bool {
 	panic("implement me")
 }
@@ -312,6 +320,8 @@ func (t *noopVCursor) SetClientFoundRows(context.Context, bool) error {
 
 func (t *noopVCursor) SetQueryTimeout(maxExecutionTime int64) {
 }
+
+func (t *noopVCursor) SetTransactionTimeout(timeout int64) {}
 
 func (t *noopVCursor) SetSkipQueryPlanCache(context.Context, bool) error {
 	panic("implement me")
@@ -388,11 +398,11 @@ func (t *noopVCursor) ExecuteKeyspaceID(ctx context.Context, keyspace string, ks
 	panic("unimplemented")
 }
 
-func (t *noopVCursor) ResolveDestinations(ctx context.Context, keyspace string, ids []*querypb.Value, destinations []key.Destination) ([]*srvtopo.ResolvedShard, [][]*querypb.Value, error) {
+func (t *noopVCursor) ResolveDestinations(ctx context.Context, keyspace string, ids []*querypb.Value, destinations []key.ShardDestination) ([]*srvtopo.ResolvedShard, [][]*querypb.Value, error) {
 	return nil, nil, nil
 }
 
-func (t *noopVCursor) ResolveDestinationsMultiCol(ctx context.Context, keyspace string, ids [][]sqltypes.Value, destinations []key.Destination) ([]*srvtopo.ResolvedShard, [][][]sqltypes.Value, error) {
+func (t *noopVCursor) ResolveDestinationsMultiCol(ctx context.Context, keyspace string, ids [][]sqltypes.Value, destinations []key.ShardDestination) ([]*srvtopo.ResolvedShard, [][][]sqltypes.Value, error) {
 	panic("unimplemented")
 }
 
@@ -406,6 +416,7 @@ func (t *noopVCursor) DisableLogging()        {}
 func (t *noopVCursor) GetVExplainLogs() []ExecuteEntry {
 	return nil
 }
+
 func (t *noopVCursor) GetLogs() ([]ExecuteEntry, error) {
 	return nil, nil
 }
@@ -463,6 +474,12 @@ type loggingVCursor struct {
 	onExecuteMultiShardFn  func(context.Context, Primitive, []*srvtopo.ResolvedShard, []*querypb.BoundQuery, bool, bool)
 	onStreamExecuteMultiFn func(context.Context, Primitive, string, []*srvtopo.ResolvedShard, []map[string]*querypb.BindVariable, bool, bool, func(*sqltypes.Result) error)
 	onRecordMirrorStatsFn  func(time.Duration, time.Duration, error)
+
+	metrics *Metrics
+}
+
+func (f *loggingVCursor) GetExecutionMetrics() *Metrics {
+	return f.metrics
 }
 
 func (f *loggingVCursor) HasCreatedTempTable() {
@@ -515,6 +532,10 @@ func (f *loggingVCursor) SetFoundRows(u uint64) {
 	panic("implement me")
 }
 
+func (f *loggingVCursor) SetInDMLExecution(inDMLExec bool) {
+	f.log = append(f.log, fmt.Sprintf("InDMLExecution set to %v", inDMLExec))
+}
+
 func (f *loggingVCursor) InTransactionAndIsDML() bool {
 	return false
 }
@@ -554,7 +575,7 @@ func (f *loggingVCursor) Session() SessionActions {
 }
 
 func (f *loggingVCursor) SetTarget(target string) error {
-	f.log = append(f.log, fmt.Sprintf("Target set to %s", target))
+	f.log = append(f.log, "Target set to "+target)
 	return nil
 }
 
@@ -640,7 +661,7 @@ func (f *loggingVCursor) StreamExecuteMulti(ctx context.Context, primitive Primi
 	return []error{callback(r)}
 }
 
-func (f *loggingVCursor) ResolveDestinations(ctx context.Context, keyspace string, ids []*querypb.Value, destinations []key.Destination) ([]*srvtopo.ResolvedShard, [][]*querypb.Value, error) {
+func (f *loggingVCursor) ResolveDestinations(ctx context.Context, keyspace string, ids []*querypb.Value, destinations []key.ShardDestination) ([]*srvtopo.ResolvedShard, [][]*querypb.Value, error) {
 	f.log = append(f.log, fmt.Sprintf("ResolveDestinations %v %v %v", keyspace, ids, key.DestinationsString(destinations)))
 	if f.shardErr != nil {
 		return nil, nil, f.shardErr
@@ -713,7 +734,7 @@ func (f *loggingVCursor) ResolveDestinations(ctx context.Context, keyspace strin
 	return rss, values, nil
 }
 
-func (f *loggingVCursor) ResolveDestinationsMultiCol(ctx context.Context, keyspace string, ids [][]sqltypes.Value, destinations []key.Destination) ([]*srvtopo.ResolvedShard, [][][]sqltypes.Value, error) {
+func (f *loggingVCursor) ResolveDestinationsMultiCol(ctx context.Context, keyspace string, ids [][]sqltypes.Value, destinations []key.ShardDestination) ([]*srvtopo.ResolvedShard, [][][]sqltypes.Value, error) {
 	f.log = append(f.log, fmt.Sprintf("ResolveDestinationsMultiCol %v %v %v", keyspace, ids, key.DestinationsString(destinations)))
 	if f.shardErr != nil {
 		return nil, nil, f.shardErr

@@ -29,10 +29,10 @@ func TestWaitForLocksRelease(t *testing.T) {
 
 	t.Run("Timeout from shutdownWaitTime", func(t *testing.T) {
 		// Increment shardsLockCounter to simulate locking of a shard
-		atomic.AddInt32(&shardsLockCounter, +1)
+		atomic.AddInt64(&shardsLockCounter, +1)
 		defer func() {
 			// Restore the initial value
-			atomic.StoreInt32(&shardsLockCounter, 0)
+			atomic.StoreInt64(&shardsLockCounter, 0)
 		}()
 		shutdownWaitTime = 200 * time.Millisecond
 		timeSpent := waitForLocksReleaseAndGetTimeWaitedFor()
@@ -42,12 +42,12 @@ func TestWaitForLocksRelease(t *testing.T) {
 
 	t.Run("Successful wait for locks release", func(t *testing.T) {
 		// Increment shardsLockCounter to simulate locking of a shard
-		atomic.AddInt32(&shardsLockCounter, +1)
+		atomic.AddInt64(&shardsLockCounter, +1)
 		shutdownWaitTime = 500 * time.Millisecond
 		// Release the locks after 200 milliseconds
 		go func() {
 			time.Sleep(200 * time.Millisecond)
-			atomic.StoreInt32(&shardsLockCounter, 0)
+			atomic.StoreInt64(&shardsLockCounter, 0)
 		}()
 		timeSpent := waitForLocksReleaseAndGetTimeWaitedFor()
 		assert.Greater(t, timeSpent, 100*time.Millisecond, "waitForLocksRelease should wait for the locks and not return early")
@@ -91,8 +91,7 @@ func TestRefreshAllInformation(t *testing.T) {
 	require.False(t, discoveredOnce)
 
 	// Test success
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	defer cancel2()
+	ctx2 := t.Context()
 	require.NoError(t, refreshAllInformation(ctx2))
 	require.True(t, process.FirstDiscoveryCycleComplete.Load())
 	_, discoveredOnce = process.HealthTest()

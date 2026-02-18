@@ -29,9 +29,7 @@ import (
 	"vitess.io/vitess/go/vt/vterrors"
 )
 
-var (
-	_ MultiColumn = (*MultiCol)(nil)
-)
+var _ MultiColumn = (*MultiCol)(nil)
 
 type MultiCol struct {
 	name        string
@@ -88,8 +86,8 @@ func (m *MultiCol) NeedsVCursor() bool {
 	return false
 }
 
-func (m *MultiCol) Map(ctx context.Context, vcursor VCursor, rowsColValues [][]sqltypes.Value) ([]key.Destination, error) {
-	out := make([]key.Destination, 0, len(rowsColValues))
+func (m *MultiCol) Map(ctx context.Context, vcursor VCursor, rowsColValues [][]sqltypes.Value) ([]key.ShardDestination, error) {
+	out := make([]key.ShardDestination, 0, len(rowsColValues))
 	for _, colValues := range rowsColValues {
 		partial, ksid, err := m.mapKsid(colValues)
 		if err != nil {
@@ -175,7 +173,7 @@ func getColumnVindex(m map[string]string, colCount int) (map[int]Hashing, int, e
 		}
 		subParams[k] = v
 	}
-	for i := 0; i < colCount; i++ {
+	for i := range colCount {
 		selVdx := defaultVindex
 		if len(colVdxs) > i {
 			providedVdx := strings.TrimSpace(colVdxs[i])
@@ -229,7 +227,7 @@ func getColumnBytes(m map[string]string, colCount int) (map[int]int, error) {
 	if pendingCol <= 0 {
 		return columnBytes, nil
 	}
-	for idx := 0; idx < colCount; idx++ {
+	for idx := range colCount {
 		if _, defined := columnBytes[idx]; defined {
 			continue
 		}

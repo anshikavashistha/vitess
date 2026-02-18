@@ -30,6 +30,7 @@ import (
 
 	"vitess.io/vitess/go/mysql"
 	"vitess.io/vitess/go/test/endtoend/cluster"
+	vtutils "vitess.io/vitess/go/vt/utils"
 )
 
 var (
@@ -80,12 +81,12 @@ func TestMain(m *testing.M) {
 			SchemaSQL: sqlSchema,
 			VSchema:   vSchema,
 		}
-		if err := clusterInstance.StartKeyspace(*keyspace, []string{"-80", "80-"}, 1, true); err != nil {
+		if err := clusterInstance.StartKeyspace(*keyspace, []string{"-80", "80-"}, 1, true, clusterInstance.Cell); err != nil {
 			return 1
 		}
 
 		// Start vtgate
-		clusterInstance.VtGateExtraArgs = []string{"--lock_heartbeat_time", "2s"}
+		clusterInstance.VtGateExtraArgs = []string{vtutils.GetFlagVariantForTests("--lock-heartbeat-time"), "2s"}
 		if err := clusterInstance.StartVtgate(); err != nil {
 			return 1
 		}

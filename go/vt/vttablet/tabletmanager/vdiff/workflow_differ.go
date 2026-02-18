@@ -70,12 +70,19 @@ func newWorkflowDiffer(ct *controller, opts *tabletmanagerdatapb.VDiffOptions, c
 	return wd, nil
 }
 
-// If the only difference is the order in which the rows were returned
-// by MySQL on each side then we'll have the same number of extras on
-// both sides. If that's the case, then let's see if the extra rows on
-// both sides are actually different.
+// reconcileExtraRows compares the extra rows in the source and target tables. If there are any matching rows, they are
+// removed from the extra rows. The number of extra rows to compare is limited by vdiff option maxExtraRowsToCompare.
 func (wd *workflowDiffer) reconcileExtraRows(dr *DiffReport, maxExtraRowsToCompare int64, maxReportSampleRows int64) error {
-	if dr.MismatchedRows == 0 {
+	err := wd.reconcileReferenceTables(dr)
+	if err != nil {
+		return err
+	}
+
+	return wd.doReconcileExtraRows(dr, maxExtraRowsToCompare, maxReportSampleRows)
+}
+
+func (wd *workflowDiffer) reconcileReferenceTables(dr *DiffReport) error {
+	if dr.MismatchedRows == 0 && dr.MatchingRows > 0 {
 		// Get the VSchema on the target and source keyspaces. We can then use this
 		// for handling additional edge cases, such as adjusting results for reference
 		// tables when the shard count is different between the source and target as
@@ -105,41 +112,81 @@ func (wd *workflowDiffer) reconcileExtraRows(dr *DiffReport, maxExtraRowsToCompa
 			dr.ExtraRowsTargetDiffs = nil
 		}
 	}
+	return nil
+}
 
-	if (dr.ExtraRowsSource == dr.ExtraRowsTarget) && (dr.ExtraRowsSource <= maxExtraRowsToCompare) {
-		for i := 0; i < len(dr.ExtraRowsSourceDiffs); i++ {
-			foundMatch := false
-			for j := 0; j < len(dr.ExtraRowsTargetDiffs); j++ {
-				if reflect.DeepEqual(dr.ExtraRowsSourceDiffs[i], dr.ExtraRowsTargetDiffs[j]) {
-					dr.ExtraRowsSourceDiffs = append(dr.ExtraRowsSourceDiffs[:i], dr.ExtraRowsSourceDiffs[i+1:]...)
-					dr.ExtraRowsTargetDiffs = append(dr.ExtraRowsTargetDiffs[:j], dr.ExtraRowsTargetDiffs[j+1:]...)
-					dr.ExtraRowsSource--
-					dr.ExtraRowsTarget--
-					dr.ProcessedRows--
-					dr.MatchingRows++
-					// We've removed an element from both slices at the current index
-					// so we need to shift the counters back as well to process the
-					// new elements at the index and avoid using an index out of range.
-					i--
-					j--
-					foundMatch = true
-					break
-				}
+func (wd *workflowDiffer) doReconcileExtraRows(dr *DiffReport, maxExtraRowsToCompare int64, maxReportSampleRows int64) error {
+	if dr.ExtraRowsSource == 0 || dr.ExtraRowsTarget == 0 {
+		return nil
+	}
+	matchedSourceDiffs := make([]bool, len(dr.ExtraRowsSourceDiffs))
+	matchedTargetDiffs := make([]bool, len(dr.ExtraRowsTargetDiffs))
+	matchedDiffs := int64(0)
+
+	maxRows := min(int(dr.ExtraRowsSource), int(maxExtraRowsToCompare))
+	log.Info(fmt.Sprintf("Reconciling extra rows for table %s in vdiff %s, extra source rows %d, extra target rows %d, max rows %d", dr.TableName, wd.ct.uuid, dr.ExtraRowsSource, dr.ExtraRowsTarget, maxRows))
+
+	// Find the matching extra rows
+	for i := 0; i < len(dr.ExtraRowsSourceDiffs); i++ {
+		for j := 0; j < len(dr.ExtraRowsTargetDiffs); j++ {
+			if matchedTargetDiffs[j] {
+				// previously matched
+				continue
 			}
-			// If we didn't find a match then the tables are in fact different and we can short circuit the second pass
-			if !foundMatch {
+			if reflect.DeepEqual(dr.ExtraRowsSourceDiffs[i], dr.ExtraRowsTargetDiffs[j]) {
+				matchedSourceDiffs[i] = true
+				matchedTargetDiffs[j] = true
+				matchedDiffs++
 				break
 			}
 		}
 	}
-	// We can now trim the extra rows diffs on both sides to the maxReportSampleRows value
+
+	if matchedDiffs == 0 {
+		log.Info(fmt.Sprintf("No matching extra rows found for table %s in vdiff %s, checked %d rows", dr.TableName, wd.ct.uuid, maxRows))
+	} else {
+		// Now remove the matching extra rows
+		newExtraRowsSourceDiffs := make([]*RowDiff, 0, int64(len(dr.ExtraRowsSourceDiffs))-matchedDiffs)
+		for i := 0; i < len(dr.ExtraRowsSourceDiffs); i++ {
+			if !matchedSourceDiffs[i] {
+				newExtraRowsSourceDiffs = append(newExtraRowsSourceDiffs, dr.ExtraRowsSourceDiffs[i])
+			}
+			if len(newExtraRowsSourceDiffs) >= maxRows {
+				break
+			}
+		}
+
+		newExtraRowsTargetDiffs := make([]*RowDiff, 0, int64(len(dr.ExtraRowsTargetDiffs))-matchedDiffs)
+		for i := 0; i < len(dr.ExtraRowsTargetDiffs); i++ {
+			if !matchedTargetDiffs[i] {
+				newExtraRowsTargetDiffs = append(newExtraRowsTargetDiffs, dr.ExtraRowsTargetDiffs[i])
+			}
+			if len(newExtraRowsTargetDiffs) >= maxRows {
+				break
+			}
+		}
+		dr.ExtraRowsSourceDiffs = newExtraRowsSourceDiffs
+		dr.ExtraRowsTargetDiffs = newExtraRowsTargetDiffs
+
+		// Update the counts
+		dr.ExtraRowsSource -= matchedDiffs
+		dr.ExtraRowsTarget -= matchedDiffs
+		dr.MatchingRows += matchedDiffs
+
+		// We do not update `ProcessedRows` here, because any extra target or source rows are already included in it.
+		// We do not update `MismatchedRows`, because extra target or source rows are not counted as mismatches.
+
+		log.Info(fmt.Sprintf("Reconciled extra rows for table %s in vdiff %s, matching rows %d, extra source rows %d, extra target rows %d. Max compared rows %d", dr.TableName, wd.ct.uuid, matchedDiffs, dr.ExtraRowsSource, dr.ExtraRowsTarget, maxRows))
+	}
+
+	// Trim the extra rows diffs to the maxReportSampleRows value. Note we need to do this after updating
+	// the slices and counts above, since maxExtraRowsToCompare can be greater than maxVDiffReportSampleRows.
 	if int64(len(dr.ExtraRowsSourceDiffs)) > maxReportSampleRows && maxReportSampleRows > 0 {
 		dr.ExtraRowsSourceDiffs = dr.ExtraRowsSourceDiffs[:maxReportSampleRows-1]
 	}
 	if int64(len(dr.ExtraRowsTargetDiffs)) > maxReportSampleRows && maxReportSampleRows > 0 {
 		dr.ExtraRowsTargetDiffs = dr.ExtraRowsTargetDiffs[:maxReportSampleRows-1]
 	}
-
 	return nil
 }
 
@@ -177,7 +224,7 @@ func (wd *workflowDiffer) diffTable(ctx context.Context, dbClient binlogplayer.D
 		maxDiffRuntime = time.Duration(wd.ct.options.CoreOptions.MaxDiffSeconds) * time.Second
 	}
 
-	log.Infof("Starting differ on table %s for vdiff %s", td.table.Name, wd.ct.uuid)
+	log.Info(fmt.Sprintf("Starting differ on table %s for vdiff %s", td.table.Name, wd.ct.uuid))
 	if err := td.updateTableState(ctx, dbClient, StartedState); err != nil {
 		return err
 	}
@@ -207,22 +254,22 @@ func (wd *workflowDiffer) diffTable(ctx context.Context, dbClient binlogplayer.D
 		if err := td.initialize(ctx); err != nil { // Setup the consistent snapshots
 			return err
 		}
-		log.Infof("Table initialization done on table %s for vdiff %s", td.table.Name, wd.ct.uuid)
+		log.Info(fmt.Sprintf("Table initialization done on table %s for vdiff %s", td.table.Name, wd.ct.uuid))
 		diffTimer = time.NewTimer(maxDiffRuntime)
 		diffReport, diffErr = td.diff(ctx, wd.opts.CoreOptions, wd.opts.ReportOptions, diffTimer.C)
 		if diffErr == nil { // We finished the diff successfully
 			break
 		}
-		log.Errorf("Encountered an error diffing table %s for vdiff %s: %v", td.table.Name, wd.ct.uuid, diffErr)
+		log.Error(fmt.Sprintf("Encountered an error diffing table %s for vdiff %s: %v", td.table.Name, wd.ct.uuid, diffErr))
 		if !errors.Is(diffErr, ErrMaxDiffDurationExceeded) { // We only want to retry if we hit the max-diff-duration
 			return diffErr
 		}
 	}
-	log.Infof("Table diff done on table %s for vdiff %s with report: %+v", td.table.Name, wd.ct.uuid, diffReport)
+	log.Info(fmt.Sprintf("Table diff done on table %s for vdiff %s with report: %+v", td.table.Name, wd.ct.uuid, diffReport))
 
 	if diffReport.ExtraRowsSource > 0 || diffReport.ExtraRowsTarget > 0 {
 		if err := wd.reconcileExtraRows(diffReport, wd.opts.CoreOptions.MaxExtraRowsToCompare, wd.opts.ReportOptions.MaxSampleRows); err != nil {
-			log.Errorf("Encountered an error reconciling extra rows found for table %s for vdiff %s: %v", td.table.Name, wd.ct.uuid, err)
+			log.Error(fmt.Sprintf("Encountered an error reconciling extra rows found for table %s for vdiff %s: %v", td.table.Name, wd.ct.uuid, err))
 			return vterrors.Wrap(err, "failed to reconcile extra rows")
 		}
 	}
@@ -233,7 +280,7 @@ func (wd *workflowDiffer) diffTable(ctx context.Context, dbClient binlogplayer.D
 		}
 	}
 
-	log.Infof("Completed reconciliation on table %s for vdiff %s with updated report: %+v", td.table.Name, wd.ct.uuid, diffReport)
+	log.Info(fmt.Sprintf("Completed reconciliation on table %s for vdiff %s with updated report: %+v", td.table.Name, wd.ct.uuid, diffReport))
 	if err := td.updateTableStateAndReport(ctx, dbClient, CompletedState, diffReport); err != nil {
 		return err
 	}
@@ -297,7 +344,7 @@ func (wd *workflowDiffer) diff(ctx context.Context) (err error) {
 				td.table.Name, wd.ct.vde.thisTablet.Alias)
 		}
 
-		log.Infof("Starting diff of table %s for vdiff %s", td.table.Name, wd.ct.uuid)
+		log.Info(fmt.Sprintf("Starting diff of table %s for vdiff %s", td.table.Name, wd.ct.uuid))
 		if err := wd.diffTable(ctx, dbClient, td); err != nil {
 			if err := td.updateTableState(ctx, dbClient, ErrorState); err != nil {
 				return err
@@ -308,7 +355,7 @@ func (wd *workflowDiffer) diff(ctx context.Context) (err error) {
 		if err := td.updateTableState(ctx, dbClient, CompletedState); err != nil {
 			return err
 		}
-		log.Infof("Completed diff of table %s for vdiff %s", td.table.Name, wd.ct.uuid)
+		log.Info(fmt.Sprintf("Completed diff of table %s for vdiff %s", td.table.Name, wd.ct.uuid))
 	}
 	if err := wd.markIfCompleted(ctx, dbClient); err != nil {
 		return err
@@ -440,11 +487,11 @@ func (wd *workflowDiffer) initVDiffTables(dbClient binlogplayer.DBClient) error 
 				wd.ct.vde.dbName,
 				tableName,
 			)
-			log.Infof("Updating the table stats for %s.%s using: %q", wd.ct.vde.dbName, tableName, stmt.Query)
+			log.Info(fmt.Sprintf("Updating the table stats for %s.%s using: %q", wd.ct.vde.dbName, tableName, stmt.Query))
 			if _, err := dbClient.ExecuteFetch(stmt.Query, -1); err != nil {
 				return err
 			}
-			log.Infof("Finished updating the table stats for %s.%s", wd.ct.vde.dbName, tableName)
+			log.Info(fmt.Sprintf("Finished updating the table stats for %s.%s", wd.ct.vde.dbName, tableName))
 		}
 		tableIn.WriteString(encodeString(tableName))
 		if n++; n < len(wd.tableDiffers) {

@@ -19,6 +19,7 @@ package sqlparser
 // analyzer.go contains utility analysis functions.
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
@@ -30,7 +31,8 @@ type StatementType int
 // These constants are used to identify the SQL statement type.
 // Changing this list will require reviewing all calls to Preview.
 const (
-	StmtSelect StatementType = iota
+	StmtUnknown StatementType = iota
+	StmtSelect
 	StmtStream
 	StmtInsert
 	StmtReplace
@@ -45,7 +47,6 @@ const (
 	StmtUse
 	StmtOther
 	StmtAnalyze
-	StmtUnknown
 	StmtComment
 	StmtPriv
 	StmtExplain
@@ -57,8 +58,7 @@ const (
 	StmtUnlockTables
 	StmtFlush
 	StmtCallProc
-	StmtRevert
-	StmtShowMigrationLogs
+	StmtMigration
 	StmtCommentOnly
 	StmtPrepare
 	StmtExecute
@@ -83,10 +83,8 @@ func ASTToStatementType(stmt Statement) StatementType {
 		return StmtShow
 	case DDLStatement, DBDDLStatement, *AlterVschema:
 		return StmtDDL
-	case *RevertMigration:
-		return StmtRevert
-	case *ShowMigrationLogs:
-		return StmtShowMigrationLogs
+	case *AlterMigration, *RevertMigration, *ShowMigrationLogs:
+		return StmtMigration
 	case *Use:
 		return StmtUse
 	case *OtherAdmin, *Load:
@@ -145,12 +143,11 @@ func CanNormalize(stmt Statement) bool {
 
 // CachePlan takes Statement and returns true if the query plan should be cached
 func CachePlan(stmt Statement) bool {
-	switch stmt.(type) {
-	case *Select, *Insert, *Update, *Delete, *Union, *Stream:
-		return !checkDirective(stmt, DirectiveSkipQueryPlanCache)
-	default:
+	_, supportSetVar := stmt.(SupportOptimizerHint)
+	if !supportSetVar {
 		return false
 	}
+	return !checkDirective(stmt, DirectiveSkipQueryPlanCache)
 }
 
 // MustRewriteAST takes Statement and returns true if RewriteAST must run on it for correct execution irrespective of user flags.
@@ -195,7 +192,7 @@ func Preview(sql string) StatementType {
 	case "vstream":
 		return StmtVStream
 	case "revert":
-		return StmtRevert
+		return StmtMigration
 	case "insert":
 		return StmtInsert
 	case "replace":
@@ -262,8 +259,8 @@ func (s StatementType) String() string {
 		return "STREAM"
 	case StmtVStream:
 		return "VSTREAM"
-	case StmtRevert:
-		return "REVERT"
+	case StmtMigration:
+		return "MIGRATION"
 	case StmtInsert:
 		return "INSERT"
 	case StmtReplace:
@@ -315,7 +312,7 @@ func (s StatementType) String() string {
 	case StmtExecute:
 		return "EXECUTE"
 	case StmtDeallocate:
-		return "DEALLOCATE PREPARE"
+		return "DEALLOCATE_PREPARE"
 	case StmtKill:
 		return "KILL"
 	default:
@@ -354,15 +351,15 @@ func (p *Parser) TableFromStatement(sql string) (TableName, error) {
 		return TableName{}, fmt.Errorf("unrecognized statement: %s", sql)
 	}
 	if len(sel.From) != 1 {
-		return TableName{}, fmt.Errorf("table expression is complex")
+		return TableName{}, errors.New("table expression is complex")
 	}
 	aliased, ok := sel.From[0].(*AliasedTableExpr)
 	if !ok {
-		return TableName{}, fmt.Errorf("table expression is complex")
+		return TableName{}, errors.New("table expression is complex")
 	}
 	tableName, ok := aliased.Expr.(TableName)
 	if !ok {
-		return TableName{}, fmt.Errorf("table expression is complex")
+		return TableName{}, errors.New("table expression is complex")
 	}
 	return tableName, nil
 }
@@ -381,6 +378,20 @@ func GetTableName(node SimpleTableExpr) IdentifierCS {
 func IsColName(node Expr) bool {
 	_, ok := node.(*ColName)
 	return ok
+}
+
+var errNotStatic = errors.New("not static")
+
+// IsConstant returns true if the Expr can be evaluated without input or access to tables.
+func IsConstant(node Expr) bool {
+	err := Walk(func(node SQLNode) (kontinue bool, err error) {
+		switch node.(type) {
+		case *ColName, *Subquery:
+			return false, errNotStatic
+		}
+		return true, nil
+	}, node)
+	return err == nil
 }
 
 // IsValue returns true if the Expr is a string, integral or value arg.
@@ -425,11 +436,12 @@ func IsSimpleTuple(node Expr) bool {
 	return false
 }
 
-// IsLockingFunc returns true for all functions that are used to work with mysql advisory locks
-func IsLockingFunc(node Expr) bool {
-	switch node.(type) {
-	case *LockingFunc:
+// IsReadStatement returns true if the statement is a read statement.
+func (stmt StatementType) IsReadStatement() bool {
+	switch stmt {
+	case StmtSelect, StmtShow:
 		return true
+	default:
+		return false
 	}
-	return false
 }

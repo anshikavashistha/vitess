@@ -35,12 +35,14 @@ import (
 
 	"vitess.io/vitess/go/test/endtoend/cluster"
 	"vitess.io/vitess/go/vt/proto/topodata"
+	"vitess.io/vitess/go/vt/utils"
 )
 
 var (
 	localCluster *cluster.LocalProcessCluster
 	cell1        = "zone1"
 	cell2        = "zone2"
+	vtorcCell    = cell1
 	hostname     = "localhost"
 	keyspaceName = "ks"
 	tableName    = "test_table"
@@ -53,13 +55,13 @@ var (
 					) Engine=InnoDB
 `
 	commonTabletArg = []string{
-		"--vreplication_retry_delay", "1s",
-		"--degraded_threshold", "5s",
-		"--lock_tables_timeout", "5s",
-		"--watch_replication_stream",
-		"--enable_replication_reporter",
-		"--serving_state_grace_period", "1s",
-		"--binlog_player_protocol", "grpc",
+		utils.GetFlagVariantForTests("--vreplication-retry-delay"), "1s",
+		utils.GetFlagVariantForTests("--degraded-threshold"), "5s",
+		utils.GetFlagVariantForTests("--lock-tables-timeout"), "5s",
+		utils.GetFlagVariantForTests("--watch-replication-stream"),
+		utils.GetFlagVariantForTests("--enable-replication-reporter"),
+		utils.GetFlagVariantForTests("--serving-state-grace-period"), "1s",
+		utils.GetFlagVariantForTests("--binlog-player-protocol"), "grpc",
 	}
 	vSchema = `
 		{
@@ -207,7 +209,7 @@ func TestMain(m *testing.M) {
 			return 1, err
 		}
 
-		if err := localCluster.StartVTOrc(keyspaceName); err != nil {
+		if err := localCluster.StartVTOrc(vtorcCell, keyspaceName); err != nil {
 			return 1, err
 		}
 
@@ -231,7 +233,6 @@ func TestMain(m *testing.M) {
 }
 
 func TestAlias(t *testing.T) {
-
 	insertInitialValues(t)
 	defer deleteInitialValues(t)
 
@@ -290,11 +291,9 @@ func TestAlias(t *testing.T) {
 	testQueriesOnTabletType(t, "primary", vtgateInstance.GrpcPort, false)
 	testQueriesOnTabletType(t, "replica", vtgateInstance.GrpcPort, true)
 	testQueriesOnTabletType(t, "rdonly", vtgateInstance.GrpcPort, true)
-
 }
 
 func TestAddAliasWhileVtgateUp(t *testing.T) {
-
 	insertInitialValues(t)
 	defer deleteInitialValues(t)
 
@@ -334,7 +333,6 @@ func TestAddAliasWhileVtgateUp(t *testing.T) {
 	// TODO(deepthi) change the following to shouldFail:false when fixing https://github.com/vitessio/vitess/issues/5911
 	testQueriesOnTabletType(t, "replica", vtgateInstance.GrpcPort, true)
 	testQueriesOnTabletType(t, "rdonly", vtgateInstance.GrpcPort, true)
-
 }
 
 func waitTillAllTabletsAreHealthyInVtgate(t *testing.T, vtgateInstance cluster.VtgateProcess, shards ...string) {
@@ -349,7 +347,7 @@ func testQueriesOnTabletType(t *testing.T, tabletType string, vtgateGrpcPort int
 	qr, err := localCluster.ExecOnVTGate(context.Background(),
 		fmt.Sprintf("%s:%d", localCluster.Hostname, vtgateGrpcPort),
 		"@"+tabletType,
-		fmt.Sprintf(`select * from %s`, tableName), nil, nil,
+		"select * from "+tableName, nil, nil,
 	)
 	if shouldFail {
 		require.Error(t, err)

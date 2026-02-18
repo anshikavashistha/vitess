@@ -19,9 +19,12 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"maps"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,7 +53,6 @@ import (
 	querypb "vitess.io/vitess/go/vt/proto/query"
 	tabletmanagerdatapb "vitess.io/vitess/go/vt/proto/tabletmanagerdata"
 	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
-	vschemapb "vitess.io/vitess/go/vt/proto/vschema"
 	vtctldatapb "vitess.io/vitess/go/vt/proto/vtctldata"
 	vtrpcpb "vitess.io/vitess/go/vt/proto/vtrpc"
 )
@@ -80,7 +82,7 @@ func getTablesInKeyspace(ctx context.Context, ts *topo.Server, tmc tmclient.Tabl
 	if err != nil {
 		return nil, err
 	}
-	log.Infof("got table schemas: %+v from source primary %v.", schema, primary)
+	log.Info(fmt.Sprintf("got table schemas: %+v from source primary %v.", schema, primary))
 
 	var sourceTables []string
 	for _, td := range schema.TableDefinitions {
@@ -153,7 +155,7 @@ func createDefaultShardRoutingRules(ctx context.Context, ms *vtctldatapb.Materia
 		if srr[fromSource] == "" && srr[fromTarget] == "" {
 			srr[fromTarget] = ms.SourceKeyspace
 			changed = true
-			log.Infof("Added default shard routing rule from %q to %q", fromTarget, fromSource)
+			log.Info(fmt.Sprintf("Added default shard routing rule from %q to %q", fromTarget, fromSource))
 		}
 	}
 	if changed {
@@ -237,7 +239,6 @@ func stripAutoIncrement(ddl string, parser *sqlparser.Parser, replace func(colum
 					if err := replace(sqlparser.String(node.Name)); err != nil {
 						return false, vterrors.Wrapf(err, "failed to replace auto_increment column %q in %q", sqlparser.String(node.Name), ddl)
 					}
-
 				}
 			}
 		}
@@ -333,12 +334,7 @@ func shouldInclude(table string, excludes []string) bool {
 	if schema.IsInternalOperationTableName(table) {
 		return false
 	}
-	for _, t := range excludes {
-		if t == table {
-			return false
-		}
-	}
-	return true
+	return !slices.Contains(excludes, table)
 }
 
 // getMigrationID produces a reproducible hash based on the input parameters.
@@ -443,7 +439,7 @@ func BuildTargets(ctx context.Context, ts *topo.Server, tmc tmclient.TabletManag
 
 func getSourceAndTargetKeyRanges(sourceShards, targetShards []string) (*topodatapb.KeyRange, *topodatapb.KeyRange, error) {
 	if len(sourceShards) == 0 || len(targetShards) == 0 {
-		return nil, nil, fmt.Errorf("either source or target shards are missing")
+		return nil, nil, errors.New("either source or target shards are missing")
 	}
 
 	getKeyRange := func(shard string) (*topodatapb.KeyRange, error) {
@@ -460,11 +456,11 @@ func getSourceAndTargetKeyRanges(sourceShards, targetShards []string) (*topodata
 	sort.Strings(targetShards)
 	getFullKeyRange := func(shards []string) (*topodatapb.KeyRange, error) {
 		// Expect sorted shards.
-		kr1, err := getKeyRange(sourceShards[0])
+		kr1, err := getKeyRange(shards[0])
 		if err != nil {
 			return nil, err
 		}
-		kr2, err := getKeyRange(sourceShards[len(sourceShards)-1])
+		kr2, err := getKeyRange(shards[len(shards)-1])
 		if err != nil {
 			return nil, err
 		}
@@ -590,7 +586,7 @@ func doValidateWorkflowHasCompleted(ctx context.Context, ts *trafficSwitcher) er
 		if ts.MigrationType() == binlogdatapb.MigrationType_TABLES {
 			rules, err := topotools.GetRoutingRules(ctx, ts.TopoServer())
 			if err != nil {
-				rec.RecordError(fmt.Errorf("could not get RoutingRules"))
+				rec.RecordError(errors.New("could not get RoutingRules"))
 			}
 			for fromTable, toTables := range rules {
 				for _, toTable := range toTables {
@@ -607,7 +603,6 @@ func doValidateWorkflowHasCompleted(ctx context.Context, ts *trafficSwitcher) er
 		return fmt.Errorf("%s", strings.Join(rec.ErrorStrings(), "\n"))
 	}
 	return nil
-
 }
 
 // ReverseWorkflowName returns the "reversed" name of a workflow. For a
@@ -635,12 +630,12 @@ func getRenameFileName(tableName string) string {
 
 func parseTabletTypes(tabletTypes []topodatapb.TabletType) (hasReplica, hasRdonly, hasPrimary bool, err error) {
 	for _, tabletType := range tabletTypes {
-		switch {
-		case tabletType == topodatapb.TabletType_REPLICA:
+		switch tabletType {
+		case topodatapb.TabletType_REPLICA:
 			hasReplica = true
-		case tabletType == topodatapb.TabletType_RDONLY:
+		case topodatapb.TabletType_RDONLY:
 			hasRdonly = true
-		case tabletType == topodatapb.TabletType_PRIMARY:
+		case topodatapb.TabletType_PRIMARY:
 			hasPrimary = true
 		default:
 			return false, false, false, fmt.Errorf("invalid tablet type passed %s", tabletType)
@@ -699,8 +694,8 @@ func areTabletsAvailableToStreamFrom(ctx context.Context, req *vtctldatapb.Workf
 //
 // It returns ErrNoStreams if there are no targets found for the workflow.
 func LegacyBuildTargets(ctx context.Context, ts *topo.Server, tmc tmclient.TabletManagerClient, targetKeyspace string, workflow string,
-	targetShards []string) (*TargetInfo, error) {
-
+	targetShards []string,
+) (*TargetInfo, error) {
 	var (
 		frozen          bool
 		optCells        string
@@ -785,7 +780,6 @@ func LegacyBuildTargets(ctx context.Context, ts *topo.Server, tmc tmclient.Table
 
 			workflowType = getVReplicationWorkflowType(row)
 			workflowSubType = getVReplicationWorkflowSubType(row)
-
 		}
 
 		targets[targetShard] = target
@@ -823,17 +817,18 @@ func addFilter(sel *sqlparser.Select, filter sqlparser.Expr) {
 }
 
 func getTenantClause(vrOptions *vtctldatapb.WorkflowOptions,
-	targetVSchema *vindexes.KeyspaceSchema, parser *sqlparser.Parser) (*sqlparser.Expr, error) {
+	targetVSchema *vindexes.KeyspaceSchema, parser *sqlparser.Parser,
+) (*sqlparser.Expr, error) {
 	if vrOptions.TenantId == "" {
 		return nil, nil
 	}
 	if targetVSchema == nil || targetVSchema.MultiTenantSpec == nil {
-		return nil, fmt.Errorf("target keyspace not defined, or it does not have multi-tenant spec")
+		return nil, errors.New("target keyspace not defined, or it does not have multi-tenant spec")
 	}
 	tenantColumnName := targetVSchema.MultiTenantSpec.TenantIdColumnName
 	tenantColumnType := targetVSchema.MultiTenantSpec.TenantIdColumnType
 	if tenantColumnName == "" {
-		return nil, fmt.Errorf("tenant column name not defined in multi-tenant spec")
+		return nil, errors.New("tenant column name not defined in multi-tenant spec")
 	}
 
 	var tenantId string
@@ -862,7 +857,8 @@ func getTenantClause(vrOptions *vtctldatapb.WorkflowOptions,
 }
 
 func changeKeyspaceRouting(ctx context.Context, ts *topo.Server, tabletTypes []topodatapb.TabletType,
-	sourceKeyspace, targetKeyspace, reason string) error {
+	sourceKeyspace, targetKeyspace, reason string,
+) error {
 	routes := make(map[string]string)
 	for _, tabletType := range tabletTypes {
 		suffix := getTabletTypeSuffix(tabletType)
@@ -880,9 +876,7 @@ func updateKeyspaceRoutingRules(ctx context.Context, ts *topo.Server, reason str
 	update := func() error {
 		return topotools.UpdateKeyspaceRoutingRules(ctx, ts, reason,
 			func(ctx context.Context, rules *map[string]string) error {
-				for fromKeyspace, toKeyspace := range routes {
-					(*rules)[fromKeyspace] = toKeyspace
-				}
+				maps.Copy((*rules), routes)
 				return nil
 			})
 	}
@@ -1032,14 +1026,7 @@ func validateSourceTablesExist(sourceKeyspace string, ksTables, tables []string)
 		if schema.IsInternalOperationTableName(table) {
 			continue
 		}
-		found := false
-
-		for _, ksTable := range ksTables {
-			if table == ksTable {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(ksTables, table)
 		if !found {
 			missingTables = append(missingTables, table)
 		}
@@ -1050,16 +1037,10 @@ func validateSourceTablesExist(sourceKeyspace string, ksTables, tables []string)
 	return nil
 }
 
-// getVindexAndVSchema gets the vindex (from VSchema) and VSchema with the
-// provided vindex name and keyspace.
-func getVindexAndVSchema(ctx context.Context, ts *topo.Server, keyspace string, vindexName string) (*vschemapb.Vindex, *topo.KeyspaceVSchemaInfo, error) {
-	vschema, err := ts.GetVSchema(ctx, keyspace)
-	if err != nil {
-		return nil, nil, vterrors.Errorf(vtrpcpb.Code_INTERNAL, "failed to get vschema for the %s keyspace", keyspace)
+func processWorkflowActionOptions(opts []WorkflowActionOption) workflowActionOptions {
+	var options workflowActionOptions
+	for _, o := range opts {
+		o.apply(&options)
 	}
-	vindex := vschema.Vindexes[vindexName]
-	if vindex == nil {
-		return nil, nil, vterrors.Errorf(vtrpcpb.Code_FAILED_PRECONDITION, "vindex %s not found in the %s keyspace", vindexName, keyspace)
-	}
-	return vindex, vschema, nil
+	return options
 }

@@ -18,6 +18,7 @@ package reparentutil
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -40,15 +41,57 @@ import (
 	"vitess.io/vitess/go/vt/vttablet/tmclient"
 )
 
+// RelayLogPositions contains the positions of the relay log.
+type RelayLogPositions struct {
+	// Combined represents the entire range of the relay
+	// log with the retrieved + executed GTID sets
+	// combined.
+	Combined replication.Position
+
+	// Executed represents the executed GTID set of the
+	// relay log/SQL thread.
+	Executed replication.Position
+}
+
+// AtLeast returns true if the RelayLogPositions object contains at least the positions provided
+// as pos. If the combined positions are equal, prioritize the position where more events have
+// been executed/applied, as this avoids picking tablets with SQL delay (intended or not) that
+// can delay/timeout the reparent. Otherwise, pick the larger of the two combined positions as
+// it contains more changes, irrespective of how many changes are executed/applied.
+func (rlp *RelayLogPositions) AtLeast(pos *RelayLogPositions) bool {
+	if pos == nil {
+		return false
+	}
+
+	if rlp.Combined.Equal(pos.Combined) {
+		return rlp.Executed.AtLeast(pos.Executed)
+	}
+	return rlp.Combined.AtLeast(pos.Combined)
+}
+
+// Equal returns true if the RelayLogPositions object is equal to
+// the positions provided as pos.
+func (rlp *RelayLogPositions) Equal(pos *RelayLogPositions) bool {
+	if pos == nil {
+		return false
+	}
+	return rlp.Combined.Equal(pos.Combined) && rlp.Executed.Equal(pos.Executed)
+}
+
+// IsZero returns true if the RelayLogPositions is zero.
+func (rlp *RelayLogPositions) IsZero() bool {
+	return rlp.Combined.IsZero()
+}
+
 // FindPositionsOfAllCandidates will find candidates for an emergency
 // reparent, and, if successful, return a mapping of those tablet aliases (as
 // raw strings) to their replication positions for later comparison.
 func FindPositionsOfAllCandidates(
 	statusMap map[string]*replicationdatapb.StopReplicationStatus,
 	primaryStatusMap map[string]*replicationdatapb.PrimaryStatus,
-) (map[string]replication.Position, bool, error) {
+) (map[string]*RelayLogPositions, bool, error) {
 	replicationStatusMap := make(map[string]*replication.ReplicationStatus, len(statusMap))
-	positionMap := make(map[string]replication.Position)
+	positionMap := make(map[string]*RelayLogPositions)
 
 	// Build out replication status list from proto types.
 	for alias, statuspb := range statusMap {
@@ -90,11 +133,14 @@ func FindPositionsOfAllCandidates(
 	// Store the final positions in the map.
 	for alias, status := range replicationStatusMap {
 		if !isGTIDBased {
-			positionMap[alias] = status.Position
+			positionMap[alias] = &RelayLogPositions{Combined: status.Position}
 
 			continue
 		}
-		positionMap[alias] = status.RelayLogPosition
+		positionMap[alias] = &RelayLogPositions{
+			Combined: status.RelayLogPosition,
+			Executed: status.Position,
+		}
 	}
 
 	for alias, primaryStatus := range primaryStatusMap {
@@ -103,7 +149,7 @@ func FindPositionsOfAllCandidates(
 			return nil, false, vterrors.Wrapf(err, "could not decode a primary status executed position for tablet %v: %v", alias, err)
 		}
 
-		positionMap[alias] = executedPosition
+		positionMap[alias] = &RelayLogPositions{Combined: executedPosition}
 	}
 
 	return positionMap, isGTIDBased, nil
@@ -120,18 +166,6 @@ func ReplicaWasRunning(stopStatus *replicationdatapb.StopReplicationStatus) (boo
 	replStatus := replication.ProtoToReplicationStatus(stopStatus.Before)
 	return (replStatus.IOState == replication.ReplicationStateRunning) ||
 		(replStatus.SQLState == replication.ReplicationStateRunning), nil
-}
-
-// SQLThreadWasRunning returns true if a StopReplicationStatus indicates that the
-// replica had a running sql thread. It returns an
-// error if the Before state of replication is nil.
-func SQLThreadWasRunning(stopStatus *replicationdatapb.StopReplicationStatus) (bool, error) {
-	if stopStatus == nil || stopStatus.Before == nil {
-		return false, vterrors.Errorf(vtrpc.Code_INVALID_ARGUMENT, "could not determine Before state of StopReplicationStatus %v", stopStatus)
-	}
-
-	replStatus := replication.ProtoToReplicationStatus(stopStatus.Before)
-	return replStatus.SQLState == replication.ReplicationStateRunning, nil
 }
 
 // SetReplicationSource is used to set the replication source on the specified
@@ -153,7 +187,7 @@ func SetReplicationSource(ctx context.Context, ts *topo.Server, tmc tmclient.Tab
 	if err != nil {
 		return err
 	}
-	log.Infof("Getting a new durability policy for %v", durabilityName)
+	log.Info(fmt.Sprintf("Getting a new durability policy for %v", durabilityName))
 	durability, err := policy.GetDurabilityPolicy(durabilityName)
 	if err != nil {
 		return err
@@ -222,7 +256,7 @@ func stopReplicationAndBuildStatusMaps(
 			if isSQLErr && sqlErr != nil && sqlErr.Number() == sqlerror.ERNotReplica {
 				var primaryStatus *replicationdatapb.PrimaryStatus
 
-				primaryStatus, err = tmc.DemotePrimary(groupCtx, tabletInfo.Tablet)
+				primaryStatus, err = tmc.DemotePrimary(groupCtx, tabletInfo.Tablet, true /* force */)
 				if err != nil {
 					msg := "replica %v thinks it's primary but we failed to demote it: %v"
 					err = vterrors.Wrapf(err, msg, alias, err)
@@ -252,26 +286,9 @@ func stopReplicationAndBuildStatusMaps(
 
 			m.Lock()
 			res.tabletsBackupState[alias] = isTakingBackup
+			res.statusMap[alias] = stopReplicationStatus
+			res.reachableTablets = append(res.reachableTablets, tabletInfo.Tablet)
 			m.Unlock()
-
-			var sqlThreadRunning bool
-			// Check if the sql thread was running for the tablet
-			sqlThreadRunning, err = SQLThreadWasRunning(stopReplicationStatus)
-			if err == nil {
-				// If the sql thread was running, then we will add the tablet to the status map and the list of
-				// reachable tablets.
-				if sqlThreadRunning {
-					m.Lock()
-					res.statusMap[alias] = stopReplicationStatus
-					res.reachableTablets = append(res.reachableTablets, tabletInfo.Tablet)
-					m.Unlock()
-				} else {
-					// If the sql thread was stopped, we do not consider the tablet as reachable
-					// The user must either explicitly ignore this tablet or start its replication
-					logger.Warningf("sql thread stopped on tablet - %v", alias)
-					err = vterrors.New(vtrpc.Code_FAILED_PRECONDITION, "sql thread stopped on tablet - "+alias)
-				}
-			}
 		}
 	}
 

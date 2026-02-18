@@ -132,7 +132,6 @@ func New(env tabletenv.Env) *TxSerializer {
 		queues:                       make(map[string]*queue),
 		redactUIQuery:                streamlog.NewQueryLogConfigForTest().RedactDebugUIQueries,
 	}
-
 }
 
 // DoneFunc is returned by Wait() and must be called by the caller.
@@ -274,7 +273,7 @@ func (txs *TxSerializer) unlockLocked(key string, returnSlot bool) {
 		delete(txs.queues, key)
 
 		if q.max > 1 {
-			var formattedKey = key
+			formattedKey := key
 			var logMsg string
 
 			if txs.env.Config().SanitizeLogMessages {
@@ -352,9 +351,9 @@ func (txs *TxSerializer) ServeHTTP(response http.ResponseWriter, request *http.R
 		response.Write([]byte("empty\n"))
 		return
 	}
-	response.Write([]byte(fmt.Sprintf("Length: %d\n", len(items))))
+	fmt.Fprintf(response, "Length: %d\n", len(items))
 	for _, v := range items {
-		response.Write([]byte(fmt.Sprintf("%v: %s\n", v.Count, v.Query)))
+		fmt.Fprintf(response, "%v: %s\n", v.Count, v.Query)
 	}
 }
 

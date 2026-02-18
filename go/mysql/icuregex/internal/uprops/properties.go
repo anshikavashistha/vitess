@@ -39,9 +39,11 @@ import (
 	"vitess.io/vitess/go/mysql/icuregex/internal/utrie"
 )
 
-var inclusionsMu sync.Mutex
-var inclusionsForSource = make(map[propertySource]*uset.UnicodeSet)
-var inclusionsForProperty = make(map[Property]*uset.UnicodeSet)
+var (
+	inclusionsMu          sync.Mutex
+	inclusionsForSource   = make(map[propertySource]*uset.UnicodeSet)
+	inclusionsForProperty = make(map[Property]*uset.UnicodeSet)
+)
 
 func getInclusionsForSource(src propertySource) (*uset.UnicodeSet, error) {
 	if inc, ok := inclusionsForSource[src]; ok {
@@ -390,15 +392,15 @@ func ApplyPropertyAlias(u *uset.UnicodeSet, prop, value string) error {
 				p = getPropertyEnum(prop)
 				if p >= UCharBinaryStart && p < uCharBinaryLimit {
 					v = 1
-				} else if 0 == comparePropertyNames("ANY", prop) {
+				} else if comparePropertyNames("ANY", prop) == 0 {
 					u.Clear()
 					u.AddRuneRange(uset.MinValue, uset.MaxValue)
 					return nil
-				} else if 0 == comparePropertyNames("ASCII", prop) {
+				} else if comparePropertyNames("ASCII", prop) == 0 {
 					u.Clear()
 					u.AddRuneRange(0, 0x7F)
 					return nil
-				} else if 0 == comparePropertyNames("Assigned", prop) {
+				} else if comparePropertyNames("Assigned", prop) == 0 {
 					// [:Assigned:]=[:^Cn:]
 					p = UCharGeneralCategoryMask
 					v = int32(uchar.GcCnMask)

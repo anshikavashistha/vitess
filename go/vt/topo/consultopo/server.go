@@ -21,6 +21,7 @@ package consultopo
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -30,8 +31,10 @@ import (
 	"github.com/spf13/pflag"
 
 	"vitess.io/vitess/go/vt/log"
+	"vitess.io/vitess/go/vt/proto/vtrpc"
 	"vitess.io/vitess/go/vt/servenv"
 	"vitess.io/vitess/go/vt/topo"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vterrors"
 )
 
@@ -48,10 +51,10 @@ func init() {
 }
 
 func registerServerFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&consulAuthClientStaticFile, "consul_auth_static_file", consulAuthClientStaticFile, "JSON File to read the topos/tokens from.")
-	fs.StringVar(&consulLockSessionChecks, "topo_consul_lock_session_checks", consulLockSessionChecks, "List of checks for consul session.")
-	fs.StringVar(&consulLockSessionTTL, "topo_consul_lock_session_ttl", consulLockSessionTTL, "TTL for consul session.")
-	fs.DurationVar(&consulLockDelay, "topo_consul_lock_delay", consulLockDelay, "LockDelay for consul session.")
+	utils.SetFlagStringVar(fs, &consulAuthClientStaticFile, "consul-auth-static-file", consulAuthClientStaticFile, "JSON File to read the topos/tokens from.")
+	utils.SetFlagStringVar(fs, &consulLockSessionChecks, "topo-consul-lock-session-checks", consulLockSessionChecks, "List of checks for consul session.")
+	utils.SetFlagStringVar(fs, &consulLockSessionTTL, "topo-consul-lock-session-ttl", consulLockSessionTTL, "TTL for consul session.")
+	utils.SetFlagDurationVar(fs, &consulLockDelay, "topo-consul-lock-delay", consulLockDelay, "LockDelay for consul session.")
 }
 
 // ClientAuthCred credential to use for consul clusters
@@ -78,18 +81,22 @@ func getClientCreds() (creds map[string]*ClientAuthCred, err error) {
 
 	if consulAuthClientStaticFile == "" {
 		// Not configured, nothing to do.
-		log.Infof("Consul client auth is not set up. consul_auth_static_file was not provided")
+		log.Info("Consul client auth is not set up. consul-auth-static-file was not provided")
 		return nil, nil
 	}
 
 	data, err := os.ReadFile(consulAuthClientStaticFile)
 	if err != nil {
-		err = vterrors.Wrapf(err, "Failed to read consul_auth_static_file file")
+		err = vterrors.Wrapf(err, "Failed to read consul-auth-static-file file")
 		return creds, err
 	}
 
 	if err := json.Unmarshal(data, &creds); err != nil {
-		err = vterrors.Wrapf(err, "Error parsing consul_auth_static_file")
+		err = vterrors.Wrapf(err, "Error parsing consul-auth-static-file")
+		return creds, err
+	}
+	if len(creds) == 0 {
+		err = vterrors.New(vtrpc.Code_FAILED_PRECONDITION, "Found no credentials in consul_auth_static_file")
 		return creds, err
 	}
 	return creds, nil
@@ -136,7 +143,7 @@ func NewServer(cell, serverAddr, root string) (*Server, error) {
 		if creds[cell] != nil {
 			cfg.Token = creds[cell].ACLToken
 		} else {
-			log.Warningf("Client auth not configured for cell: %v", cell)
+			log.Warn(fmt.Sprintf("Client auth not configured for cell: %v", cell))
 		}
 	}
 

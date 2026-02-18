@@ -28,6 +28,7 @@ import (
 
 	"vitess.io/vitess/go/test/endtoend/cluster"
 	"vitess.io/vitess/go/vt/log"
+	"vitess.io/vitess/go/vt/utils"
 
 	binlogdatapb "vitess.io/vitess/go/vt/proto/binlogdata"
 )
@@ -90,7 +91,7 @@ func TestFKExt(t *testing.T) {
 		"--vstream_packet_size=256",
 		"--queryserver-config-schema-change-signal",
 		parallelInsertWorkers)
-	extraVTGateArgs = append(extraVTGateArgs, "--schema_change_signal=true", "--planner-version", "Gen4")
+	extraVTGateArgs = append(extraVTGateArgs, utils.GetFlagVariantForTests("--schema-change-signal")+"=true", "--planner-version", "Gen4")
 	defer func() { extraVTTabletArgs = nil }()
 	initFKExtConfig(t)
 
@@ -152,9 +153,9 @@ func TestFKExt(t *testing.T) {
 		for i, shard := range strings.Split(threeShards, ",") {
 			tablets[shard] = vc.Cells[cellName].Keyspaces[keyspaceName].Shards[shard].Tablets[fmt.Sprintf("%s-%d", cellName, tabletID+i*100)].Vttablet
 		}
-		sqls := strings.Split(FKExtSourceSchema, "\n")
-		for _, sql := range sqls {
-			output, err := vc.VtctldClient.ExecuteCommandWithOutput("ApplySchema", "--ddl-strategy=direct", "--sql", sql, keyspaceName)
+		sqls := strings.SplitSeq(FKExtSourceSchema, "\n")
+		for sql := range sqls {
+			output, err := vc.VtctldClient.ExecuteCommandWithOutput("ApplySchema", utils.GetFlagVariantForTests("--ddl-strategy")+"=direct", "--sql", sql, keyspaceName)
 			require.NoErrorf(t, err, output)
 		}
 		doReshard(t, fkextConfig.target2KeyspaceName, "reshard2to3", "-80,80-", threeShards, tablets)
@@ -165,9 +166,9 @@ func TestFKExt(t *testing.T) {
 		require.NoError(t, vc.AddShards(t, []*Cell{defaultCell}, ks, shard, numReplicas, 0, tabletID, nil))
 		tablets := make(map[string]*cluster.VttabletProcess)
 		tablets[shard] = vc.Cells[cellName].Keyspaces[keyspaceName].Shards[shard].Tablets[fmt.Sprintf("%s-%d", cellName, tabletID)].Vttablet
-		sqls := strings.Split(FKExtSourceSchema, "\n")
-		for _, sql := range sqls {
-			output, err := vc.VtctldClient.ExecuteCommandWithOutput("ApplySchema", "--ddl-strategy=direct", "--sql", sql, keyspaceName)
+		sqls := strings.SplitSeq(FKExtSourceSchema, "\n")
+		for sql := range sqls {
+			output, err := vc.VtctldClient.ExecuteCommandWithOutput("ApplySchema", utils.GetFlagVariantForTests("--ddl-strategy")+"=direct", "--sql", sql, keyspaceName)
 			require.NoErrorf(t, err, output)
 		}
 		doReshard(t, fkextConfig.target2KeyspaceName, "reshard3to1", threeShards, "0", tablets)
@@ -177,7 +178,6 @@ func TestFKExt(t *testing.T) {
 	t.Run("Validate materialize counts at end of test", func(t *testing.T) {
 		validateMaterializeRowCounts(t)
 	})
-
 }
 
 // checkRowCounts checks that the parent and child tables in the source and target shards have the same number of rows.
@@ -192,7 +192,7 @@ func checkRowCounts(t *testing.T, keyspace string, sourceShards, targetShards []
 	}
 
 	getCount := func(tab *cluster.VttabletProcess, table string) (int64, error) {
-		qr, err := tab.QueryTablet(fmt.Sprintf("select count(*) from %s", table), keyspace, true)
+		qr, err := tab.QueryTablet("select count(*) from "+table, keyspace, true)
 		if err != nil {
 			return 0, err
 		}
@@ -213,10 +213,9 @@ func checkRowCounts(t *testing.T, keyspace string, sourceShards, targetShards []
 		count, _ = getCount(tab, "child")
 		targetChildCount += count
 	}
-	log.Infof("Source parent count: %d, child count: %d, target parent count: %d, child count: %d.",
-		sourceParentCount, sourceChildCount, targetParentCount, targetChildCount)
+	log.Info(fmt.Sprintf("Source parent count: %d, child count: %d, target parent count: %d, child count: %d.", sourceParentCount, sourceChildCount, targetParentCount, targetChildCount))
 	if sourceParentCount != targetParentCount || sourceChildCount != targetChildCount {
-		log.Infof("Row counts do not match for keyspace %s, source shards: %v, target shards: %v", keyspace, sourceShards, targetShards)
+		log.Info(fmt.Sprintf("Row counts do not match for keyspace %s, source shards: %v, target shards: %v", keyspace, sourceShards, targetShards))
 		return false
 	}
 	return true
@@ -226,7 +225,7 @@ func checkRowCounts(t *testing.T, keyspace string, sourceShards, targetShards []
 // it is another check to ensure that both tables have the same number of rows in the source and target shards after load generation
 // has stopped.
 func compareRowCounts(t *testing.T, keyspace string, sourceShards, targetShards []string) error {
-	log.Infof("Comparing row counts for keyspace %s, source shards: %v, target shards: %v", keyspace, sourceShards, targetShards)
+	log.Info(fmt.Sprintf("Comparing row counts for keyspace %s, source shards: %v, target shards: %v", keyspace, sourceShards, targetShards))
 	lg.Stop()
 	defer lg.Start()
 	if err := waitForCondition("load generator to stop", func() bool { return lg.State() == LoadGeneratorStateStopped }, 10*time.Second); err != nil {
@@ -288,8 +287,7 @@ func areRowCountsEqual(t *testing.T) bool {
 	childRowCount := getRowCount(t, vtgateConn, "target2.child")
 	parentCopyRowCount := getRowCount(t, vtgateConn, "target1.parent_copy")
 	childCopyRowCount := getRowCount(t, vtgateConn, "target1.child_copy")
-	log.Infof("Post-materialize row counts are parent: %d, child: %d, parent_copy: %d, child_copy: %d",
-		parentRowCount, childRowCount, parentCopyRowCount, childCopyRowCount)
+	log.Info(fmt.Sprintf("Post-materialize row counts are parent: %d, child: %d, parent_copy: %d, child_copy: %d", parentRowCount, childRowCount, parentCopyRowCount, childCopyRowCount))
 	if parentRowCount != parentCopyRowCount || childRowCount != childCopyRowCount {
 		return false
 	}
@@ -314,7 +312,7 @@ const fkExtMaterializeSpec = `
 
 func materializeTables(t *testing.T) {
 	wfName := "mat"
-	err := vc.VtctldClient.ExecuteCommand("ApplySchema", "--ddl-strategy=direct", "--sql", FKExtMaterializeSchema, fkextConfig.target1KeyspaceName)
+	err := vc.VtctldClient.ExecuteCommand("ApplySchema", utils.GetFlagVariantForTests("--ddl-strategy")+"=direct", "--sql", FKExtMaterializeSchema, fkextConfig.target1KeyspaceName)
 	require.NoError(t, err, fmt.Sprintf("ApplySchema Error: %s", err))
 	materializeSpec := fmt.Sprintf(fkExtMaterializeSpec, "mat", fkextConfig.target2KeyspaceName, fkextConfig.target1KeyspaceName)
 	materialize(t, materializeSpec)

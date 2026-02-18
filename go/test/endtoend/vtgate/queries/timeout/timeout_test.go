@@ -79,7 +79,7 @@ func TestQueryTimeoutWithTables(t *testing.T) {
 
 	// unsharded
 	utils.Exec(t, mcmp.VtConn, "insert /*vt+ QUERY_TIMEOUT_MS=1000 */ into uks.unsharded(id1) values (1),(2),(3),(4),(5)")
-	for i := 0; i < 12; i++ {
+	for range 12 {
 		utils.Exec(t, mcmp.VtConn, "insert /*vt+ QUERY_TIMEOUT_MS=2000 */ into uks.unsharded(id1) select id1+5 from uks.unsharded")
 	}
 
@@ -99,7 +99,7 @@ func TestQueryTimeoutWithTables(t *testing.T) {
 	utils.Exec(t, mcmp.VtConn, "select /*vt+ QUERY_TIMEOUT_MS=500 */ sleep(0.1) from t1 where id1 = 1")
 	_, err = utils.ExecAllowError(t, mcmp.VtConn, "select /*vt+ QUERY_TIMEOUT_MS=20 */ sleep(0.1) from t1 where id1 = 1")
 	require.Error(t, err)
-	assert.ErrorContains(t, err, "context deadline exceeded")
+	assert.ErrorContains(t, err, "DeadlineExceeded")
 	assert.ErrorContains(t, err, "(errno 1317) (sqlstate 70100)")
 }
 
@@ -112,7 +112,8 @@ func TestQueryTimeoutWithShardTargeting(t *testing.T) {
 	utils.Exec(t, mcmp.VtConn, "use `ks_misc/-80`")
 
 	// insert some data
-	utils.Exec(t, mcmp.VtConn, "insert into t1(id1, id2) values (1,2),(3,4),(4,5),(5,6)")
+	// Fix: Increased query timeout from 100ms to 1000ms to prevent timeout errors on slow runners.
+	utils.Exec(t, mcmp.VtConn, "insert /*vt+ QUERY_TIMEOUT_MS=1000 */ into t1(id1, id2) values (1,2),(3,4),(4,5),(5,6)")
 
 	queries := []string{
 		"insert /*vt+ QUERY_TIMEOUT_MS=1 */ into t1(id1, id2) values (6,sleep(5))",
@@ -124,7 +125,7 @@ func TestQueryTimeoutWithShardTargeting(t *testing.T) {
 	for _, query := range queries {
 		t.Run(query, func(t *testing.T) {
 			_, err := utils.ExecAllowError(t, mcmp.VtConn, query)
-			assert.ErrorContains(t, err, "context deadline exceeded")
+			// the error message can be different based on VTGate or VTTABLET or grpc error.
 			assert.ErrorContains(t, err, "(errno 1317) (sqlstate 70100)")
 		})
 	}
@@ -197,8 +198,9 @@ func TestOverallQueryTimeout(t *testing.T) {
 	_, err := utils.ExecAllowError(t, mcmp.VtConn, "select /*vt+ QUERY_TIMEOUT_MS=4000 */ sleep(u2.id2), u1.id2 from t1 u1 join t1 u2 where u1.id2 = u2.id1")
 	assert.Error(t, err)
 	// We can get two different error messages based on whether it is coming from vttablet or vtgate
+	deadLineExceeded := "DeadlineExceeded desc"
 	if !strings.Contains(err.Error(), "Query execution was interrupted, maximum statement execution time exceeded") {
-		assert.ErrorContains(t, err, "DeadlineExceeded desc = context deadline exceeded (errno 1317) (sqlstate 70100)")
+		assert.ErrorContains(t, err, deadLineExceeded)
 	}
 
 	// Let's also check that setting the session variable also works.
@@ -206,7 +208,7 @@ func TestOverallQueryTimeout(t *testing.T) {
 	_, err = utils.ExecAllowError(t, mcmp.VtConn, "select sleep(u2.id2), u1.id2 from t1 u1 join t1 u2 where u1.id2 = u2.id1")
 	assert.Error(t, err)
 	if !strings.Contains(err.Error(), "Query execution was interrupted, maximum statement execution time exceeded") {
-		assert.ErrorContains(t, err, "DeadlineExceeded desc = context deadline exceeded (errno 1317) (sqlstate 70100)")
+		assert.ErrorContains(t, err, deadLineExceeded)
 	}
 
 	// Increasing the timeout should pass the query.

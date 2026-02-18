@@ -18,6 +18,7 @@ package vtctld
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"vitess.io/vitess/go/vt/servenv"
 	"vitess.io/vitess/go/vt/topo"
 	"vitess.io/vitess/go/vt/topo/topoproto"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vttablet/tabletconn"
 
 	querypb "vitess.io/vitess/go/vt/proto/query"
@@ -39,9 +41,7 @@ import (
 // connections with tablets, and updates its internal state with the
 // result.
 
-var (
-	tabletHealthKeepAlive = 5 * time.Minute
-)
+var tabletHealthKeepAlive = 5 * time.Minute
 
 type tabletHealth struct {
 	mu sync.Mutex
@@ -66,7 +66,7 @@ func init() {
 }
 
 func registerVtctlTabletFlags(fs *pflag.FlagSet) {
-	fs.DurationVar(&tabletHealthKeepAlive, "tablet_health_keep_alive", tabletHealthKeepAlive, "close streaming tablet health connection if there are no requests for this long")
+	utils.SetFlagDurationVar(fs, &tabletHealthKeepAlive, "tablet-health-keep-alive", tabletHealthKeepAlive, "close streaming tablet health connection if there are no requests for this long")
 }
 
 func newTabletHealth() *tabletHealth {
@@ -165,9 +165,9 @@ func (thc *tabletHealthCache) Get(ctx context.Context, tabletAlias *topodatapb.T
 		thc.tabletMap[tabletAliasStr] = th
 
 		go func() {
-			log.Infof("starting health stream for tablet %v", tabletAlias)
+			log.Info(fmt.Sprintf("starting health stream for tablet %v", tabletAlias))
 			err := th.stream(context.Background(), thc.ts, tabletAlias)
-			log.Infof("tablet %v health stream ended, error: %v", tabletAlias, err)
+			log.Info(fmt.Sprintf("tablet %v health stream ended, error: %v", tabletAlias, err))
 			thc.delete(tabletAliasStr)
 		}()
 	}

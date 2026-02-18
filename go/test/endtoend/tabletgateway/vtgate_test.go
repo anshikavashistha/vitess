@@ -18,7 +18,6 @@ This tests select/insert using the unshared keyspace added in main_test
 package healthcheck
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,7 +42,7 @@ func TestVtgateHealthCheck(t *testing.T) {
 	// Healthcheck interval on tablet is set to 1s, so sleep for 2s
 	time.Sleep(2 * time.Second)
 	verifyVtgateVariables(t, clusterInstance.VtgateProcess.VerifyURL)
-	ctx := context.Background()
+	ctx := t.Context()
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.NoError(t, err)
 	defer conn.Close()
@@ -56,7 +55,7 @@ func TestVtgateReplicationStatusCheck(t *testing.T) {
 	// Healthcheck interval on tablet is set to 1s, so sleep for 2s
 	time.Sleep(2 * time.Second)
 	verifyVtgateVariables(t, clusterInstance.VtgateProcess.VerifyURL)
-	ctx := context.Background()
+	ctx := t.Context()
 	conn, err := mysql.Connect(ctx, &vtParams) // VTGate
 	require.NoError(t, err)
 	defer conn.Close()
@@ -105,7 +104,7 @@ func TestVtgateReplicationStatusCheckWithTabletTypeChange(t *testing.T) {
 	// Healthcheck interval on tablet is set to 1s, so sleep for 2s
 	time.Sleep(2 * time.Second)
 	verifyVtgateVariables(t, clusterInstance.VtgateProcess.VerifyURL)
-	ctx := context.Background()
+	ctx := t.Context()
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.NoError(t, err)
 	defer conn.Close()
@@ -179,7 +178,7 @@ func TestReplicaTransactions(t *testing.T) {
 	// TODO(deepthi): this test seems to depend on previous test. Fix tearDown so that tests are independent
 	// Healthcheck interval on tablet is set to 1s, so sleep for 2s
 	time.Sleep(2 * time.Second)
-	ctx := context.Background()
+	ctx := t.Context()
 	writeConn, err := mysql.Connect(ctx, &vtParams)
 	require.NoError(t, err)
 	defer writeConn.Close()
@@ -261,7 +260,7 @@ func TestReplicaTransactions(t *testing.T) {
 	_ = replicaTablet.VttabletProcess.TearDown()
 	// Healthcheck interval on tablet is set to 1s, so sleep for 2s
 	time.Sleep(2 * time.Second)
-	utils.AssertContainsError(t, readConn, fetchAllCustomers, "is either down or nonexistent")
+	utils.AssertContainsMultipleErrors(t, readConn, fetchAllCustomers, "VT15001", "is either down or nonexistent")
 
 	// bring up the tablet again
 	// trying to use the same session/transaction should fail as the vtgate has
@@ -271,7 +270,8 @@ func TestReplicaTransactions(t *testing.T) {
 	require.NoError(t, err)
 	serving := replicaTablet.VttabletProcess.WaitForStatus("SERVING", 60*time.Second)
 	assert.Equal(t, serving, true, "Tablet did not become ready within a reasonable time")
-	utils.AssertContainsError(t, readConn, fetchAllCustomers, "not found")
+	utils.AssertContainsError(t, readConn, fetchAllCustomers, "VT09032")
+	utils.Exec(t, readConn, "rollback")
 
 	// create a new connection, should be able to query again
 	readConn, err = mysql.Connect(ctx, &vtParams)
@@ -283,7 +283,7 @@ func TestReplicaTransactions(t *testing.T) {
 
 // TestStreamingRPCStuck tests that StreamExecute calls don't get stuck on the vttablets if a client stop reading from a stream.
 func TestStreamingRPCStuck(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	vtConn, err := mysql.Connect(ctx, &vtParams)
 	require.NoError(t, err)
 	defer vtConn.Close()
@@ -291,7 +291,7 @@ func TestStreamingRPCStuck(t *testing.T) {
 	// We want the table to have enough rows such that a streaming call returns multiple packets.
 	// Therefore, we insert one row and keep doubling it.
 	utils.Exec(t, vtConn, "insert into customer(email) values('testemail')")
-	for i := 0; i < 15; i++ {
+	for range 15 {
 		// Double the number of rows in customer table.
 		utils.Exec(t, vtConn, "insert into customer (email) select email from customer")
 	}

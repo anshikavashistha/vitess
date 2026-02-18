@@ -35,6 +35,7 @@ import (
 	"vitess.io/vitess/go/test/endtoend/onlineddl"
 	"vitess.io/vitess/go/test/endtoend/throttler"
 	"vitess.io/vitess/go/vt/schema"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/throttle/throttlerapp"
 
 	binlogdatapb "vitess.io/vitess/go/vt/proto/binlogdata"
@@ -169,22 +170,22 @@ func TestMain(m *testing.M) {
 		defer clusterInstance.Teardown()
 
 		if _, err := os.Stat(schemaChangeDirectory); os.IsNotExist(err) {
-			_ = os.Mkdir(schemaChangeDirectory, 0700)
+			_ = os.Mkdir(schemaChangeDirectory, 0o700)
 		}
 
 		clusterInstance.VtctldExtraArgs = []string{
-			"--schema_change_dir", schemaChangeDirectory,
-			"--schema_change_controller", "local",
-			"--schema_change_check_interval", "1s",
+			"--schema-change-dir", schemaChangeDirectory,
+			"--schema-change-controller", "local",
+			"--schema-change-check-interval", "1s",
 		}
 
 		clusterInstance.VtTabletExtraArgs = []string{
-			"--heartbeat_interval", "250ms",
-			"--migration_check_interval", "5s",
-			"--watch_replication_stream",
+			utils.GetFlagVariantForTests("--heartbeat-interval"), "250ms",
+			utils.GetFlagVariantForTests("--migration-check-interval"), "5s",
+			utils.GetFlagVariantForTests("--watch-replication-stream"),
 		}
 		clusterInstance.VtGateExtraArgs = []string{
-			"--ddl_strategy", "online",
+			utils.GetFlagVariantForTests("--ddl-strategy"), "online",
 		}
 
 		if err := clusterInstance.StartTopo(); err != nil {
@@ -196,7 +197,7 @@ func TestMain(m *testing.M) {
 			VSchema: vSchema,
 		}
 
-		if err := clusterInstance.StartKeyspace(*keyspace, []string{"-80", "80-"}, 1, false); err != nil {
+		if err := clusterInstance.StartKeyspace(*keyspace, []string{"-80", "80-"}, 1, false, clusterInstance.Cell); err != nil {
 			return 1, err
 		}
 		vtgateInstance := clusterInstance.NewVtgateInstance()
@@ -219,11 +220,9 @@ func TestMain(m *testing.M) {
 	} else {
 		os.Exit(exitcode)
 	}
-
 }
 
 func TestVreplSchemaChanges(t *testing.T) {
-
 	shards = clusterInstance.Keyspaces[0].Shards
 	require.Equal(t, 2, len(shards))
 	for _, shard := range shards {
@@ -487,12 +486,10 @@ func TestVreplSchemaChanges(t *testing.T) {
 		// spawn n migrations; cancel them via cancel-all
 		var wg sync.WaitGroup
 		count := 4
-		for i := 0; i < count; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range count {
+			wg.Go(func() {
 				_ = testOnlineDDLStatement(t, alterTableThrottlingStatement, "vitess", providedUUID, providedMigrationContext, "vtgate", "vrepl_col", "", false)
-			}()
+			})
 		}
 		wg.Wait()
 		onlineddl.CheckCancelAllMigrations(t, &vtParams, len(shards)*count)
@@ -506,12 +503,10 @@ func TestVreplSchemaChanges(t *testing.T) {
 		// spawn n migrations; cancel them via cancel-all
 		var wg sync.WaitGroup
 		count := 4
-		for i := 0; i < count; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range count {
+			wg.Go(func() {
 				_ = testOnlineDDLStatement(t, alterTableThrottlingStatement, "online", providedUUID, providedMigrationContext, "vtgate", "vrepl_col", "", false)
-			}()
+			})
 		}
 		wg.Wait()
 		// cancelling via vtctl does not return values. We CANCEL ALL via vtctl, then validate via VTGate that nothing remains to be cancelled.
@@ -526,7 +521,6 @@ func TestVreplSchemaChanges(t *testing.T) {
 		currentPrimaryTablet := shards[0].Vttablets[currentPrimaryTabletIndex]
 		reparentTablet := shards[0].Vttablets[1-currentPrimaryTabletIndex]
 		t.Run(fmt.Sprintf("PlannedReparentShard via throttling %d/2", (currentPrimaryTabletIndex+1)), func(t *testing.T) {
-
 			insertRows(t, 2)
 			_, err = throttler.ThrottleAppAndWaitUntilTabletsConfirm(t, clusterInstance, throttlerapp.OnlineDDLName)
 			assert.NoError(t, err)
@@ -624,7 +618,6 @@ func TestVreplSchemaChanges(t *testing.T) {
 		reparentTablet := shards[0].Vttablets[1-currentPrimaryTabletIndex]
 
 		t.Run(fmt.Sprintf("PlannedReparentShard via postponed %d/2", (currentPrimaryTabletIndex+1)), func(t *testing.T) {
-
 			insertRows(t, 2)
 
 			uuid := testOnlineDDLStatement(t, alterTableTrivialStatement, "vitess --postpone-completion", providedUUID, providedMigrationContext, "vtgate", "test_val", "", true)
@@ -885,7 +878,7 @@ func insertRow(t *testing.T) {
 }
 
 func insertRows(t *testing.T, count int) {
-	for i := 0; i < count; i++ {
+	for range count {
 		insertRow(t)
 	}
 }
@@ -920,8 +913,8 @@ func testMigrationRowCount(t *testing.T, uuid string) {
 
 func testWithInitialSchema(t *testing.T) {
 	// Create 4 tables
-	var sqlQuery = "" //nolint
-	for i := 0; i < totalTableCount; i++ {
+	sqlQuery := ""
+	for i := range totalTableCount {
 		sqlQuery = fmt.Sprintf(createTable, fmt.Sprintf("vt_onlineddl_test_%02d", i))
 		err := clusterInstance.VtctldClientProcess.ApplySchema(keyspaceName, sqlQuery)
 		require.Nil(t, err)

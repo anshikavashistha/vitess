@@ -25,7 +25,6 @@ import (
 	"vitess.io/vitess/go/sqltypes"
 	"vitess.io/vitess/go/vt/key"
 	querypb "vitess.io/vitess/go/vt/proto/query"
-	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
 	vtrpcpb "vitess.io/vitess/go/vt/proto/vtrpc"
 	"vitess.io/vitess/go/vt/sqlparser"
 	"vitess.io/vitess/go/vt/srvtopo"
@@ -103,11 +102,6 @@ func newInsert(
 		}
 	}
 	return ins
-}
-
-// RouteType returns a description of the query routing type used by the primitive
-func (ins *Insert) RouteType() string {
-	return insName[ins.Opcode]
 }
 
 // TryExecute performs a non-streaming exec.
@@ -193,7 +187,6 @@ func (ins *Insert) getInsertShardedQueries(
 	vcursor VCursor,
 	bindVars map[string]*querypb.BindVariable,
 ) ([]*srvtopo.ResolvedShard, []*querypb.BoundQuery, error) {
-
 	// vindexRowsValues builds the values of all vindex columns.
 	// the 3-d structure indexes are colVindex, row, col. Note that
 	// ins.Values indexes are colVindex, col, row. So, the conversion
@@ -238,7 +231,7 @@ func (ins *Insert) getInsertShardedQueries(
 	// each RSS.  So we pass the ksid indexes in as ids, and get them back
 	// as values. We also skip nil KeyspaceIds, no need to resolve them.
 	var indexes []*querypb.Value
-	var destinations []key.Destination
+	var destinations []key.ShardDestination
 	for i, ksid := range keyspaceIDs {
 		if ksid != nil {
 			indexes = append(indexes, &querypb.Value{
@@ -348,7 +341,6 @@ func (ins *Insert) buildVindexRowsValues(ctx context.Context, vcursor VCursor, b
 func (ins *Insert) description() PrimitiveDescription {
 	other := ins.commonDesc()
 	other["Query"] = ins.Query
-	other["TableName"] = ins.GetTableName()
 
 	if len(ins.VindexValues) > 0 {
 		valuesOffsets := map[string]string{}
@@ -389,11 +381,10 @@ func (ins *Insert) description() PrimitiveDescription {
 	}
 
 	return PrimitiveDescription{
-		OperatorType:     "Insert",
-		Keyspace:         ins.Keyspace,
-		Variant:          ins.Opcode.String(),
-		TargetTabletType: topodatapb.TabletType_PRIMARY,
-		Other:            other,
+		OperatorType: "Insert",
+		Keyspace:     ins.Keyspace,
+		Variant:      ins.Opcode.String(),
+		Other:        other,
 	}
 }
 

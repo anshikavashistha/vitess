@@ -108,7 +108,7 @@ func TestMain(m *testing.M) {
 		return m.Run(), nil
 	}()
 	if err != nil {
-		log.Errorf("top level error: %v\n", err)
+		log.Error(fmt.Sprintf("top level error: %v\n", err))
 		os.Exit(1)
 	} else {
 		os.Exit(exitcode)
@@ -132,7 +132,7 @@ func TestStandalone(t *testing.T) {
 
 	assertVSchemaExists(t, grpcAddress)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	conn, err := vtgateconn.Dial(ctx, grpcAddress)
 	require.NoError(t, err)
 	defer conn.Close()
@@ -165,7 +165,7 @@ func TestStandalone(t *testing.T) {
 func assertVSchemaExists(t *testing.T, grpcAddress string) {
 	tmpCmd := exec.Command("vtctldclient", "--server", grpcAddress, "--compact", "GetVSchema", "routed")
 
-	log.Infof("Running vtctldclient with command: %v", tmpCmd.Args)
+	log.Info(fmt.Sprintf("Running vtctldclient with command: %v", tmpCmd.Args))
 
 	output, err := tmpCmd.CombinedOutput()
 	require.NoError(t, err, fmt.Sprintf("Output:\n%v", string(output)))
@@ -178,7 +178,7 @@ func assertInsertedRowsExist(ctx context.Context, t *testing.T, conn *vtgateconn
 	bindVariables := map[string]*querypb.BindVariable{
 		"id_start": {Type: querypb.Type_UINT64, Value: []byte(strconv.FormatInt(int64(idStart), 10))},
 	}
-	res, err := cur.Execute(ctx, "select * from test_table where id >= :id_start", bindVariables)
+	res, err := cur.Execute(ctx, "select * from test_table where id >= :id_start", bindVariables, false)
 	require.NoError(t, err)
 
 	assert.Equal(t, rowCount, len(res.Rows))
@@ -199,7 +199,7 @@ func assertRouting(ctx context.Context, t *testing.T, db *sql.DB) {
 
 func assertCanInsertRow(ctx context.Context, t *testing.T, conn *vtgateconn.VTGateConn) {
 	cur := conn.Session(ks1+":80-@primary", nil)
-	_, err := cur.Execute(ctx, "begin", nil)
+	_, err := cur.Execute(ctx, "begin", nil, false)
 	require.NoError(t, err)
 
 	i := 0x810000000000000
@@ -209,10 +209,10 @@ func assertCanInsertRow(ctx context.Context, t *testing.T, conn *vtgateconn.VTGa
 		"keyspace_id": {Type: querypb.Type_UINT64, Value: []byte(strconv.FormatInt(int64(i), 10))},
 	}
 	query := "insert into test_table (id, msg, keyspace_id) values (:id, :msg, :keyspace_id)"
-	_, err = cur.Execute(ctx, query, bindVariables)
+	_, err = cur.Execute(ctx, query, bindVariables, false)
 	require.NoError(t, err)
 
-	_, err = cur.Execute(ctx, "commit", nil)
+	_, err = cur.Execute(ctx, "commit", nil, false)
 	require.NoError(t, err)
 }
 
@@ -220,7 +220,7 @@ func insertManyRows(ctx context.Context, t *testing.T, conn *vtgateconn.VTGateCo
 	cur := conn.Session(ks1+":-80@primary", nil)
 
 	query := "insert into test_table (id, msg, keyspace_id) values (:id, :msg, :keyspace_id)"
-	_, err := cur.Execute(ctx, "begin", nil)
+	_, err := cur.Execute(ctx, "begin", nil, false)
 	require.NoError(t, err)
 
 	for i := idStart; i < idStart+rowCount; i++ {
@@ -229,26 +229,26 @@ func insertManyRows(ctx context.Context, t *testing.T, conn *vtgateconn.VTGateCo
 			"msg":         {Type: querypb.Type_VARCHAR, Value: []byte("test" + strconv.FormatInt(int64(i), 10))},
 			"keyspace_id": {Type: querypb.Type_UINT64, Value: []byte(strconv.FormatInt(int64(i), 10))},
 		}
-		_, err = cur.Execute(ctx, query, bindVariables)
+		_, err = cur.Execute(ctx, query, bindVariables, false)
 		require.NoError(t, err)
 	}
 
-	_, err = cur.Execute(ctx, "commit", nil)
+	_, err = cur.Execute(ctx, "commit", nil, false)
 	require.NoError(t, err)
 }
 
 func assertTabletsPresent(t *testing.T) {
 	tmpCmd := exec.Command("vtctldclient", "--server", grpcAddress, "GetTablets", "--cell", "test")
 
-	log.Infof("Running vtctldclient with command: %v", tmpCmd.Args)
+	log.Info(fmt.Sprintf("Running vtctldclient with command: %v", tmpCmd.Args))
 
 	output, err := tmpCmd.CombinedOutput()
 	require.NoError(t, err)
 
 	numPrimary, numReplica, numRdonly, numDash80, num80Dash, numRouted := 0, 0, 0, 0, 0, 0
-	lines := strings.Split(string(output), "\n")
+	lines := strings.SplitSeq(string(output), "\n")
 
-	for _, line := range lines {
+	for line := range lines {
 		if !strings.HasPrefix(line, "test-") {
 			continue
 		}
@@ -279,7 +279,6 @@ func assertTabletsPresent(t *testing.T) {
 		default:
 			t.Logf("invalid shard %s", parts[2])
 		}
-
 	}
 
 	assert.Equal(t, 2, numPrimary)
@@ -301,17 +300,17 @@ func assertTransactionalityAndRollbackObeyed(ctx context.Context, t *testing.T, 
 		"keyspace_id": {Type: querypb.Type_UINT64, Value: []byte(strconv.FormatInt(int64(i), 10))},
 	}
 	query := "insert into test_table (id, msg, keyspace_id) values (:id, :msg, :keyspace_id)"
-	_, err := cur.Execute(ctx, query, bindVariables)
+	_, err := cur.Execute(ctx, query, bindVariables, false)
 	require.NoError(t, err)
 
 	bindVariables = map[string]*querypb.BindVariable{
 		"msg": {Type: querypb.Type_VARCHAR, Value: []byte(msg)},
 	}
-	res, err := cur.Execute(ctx, "select * from test_table where msg = :msg", bindVariables)
+	res, err := cur.Execute(ctx, "select * from test_table where msg = :msg", bindVariables, false)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(res.Rows))
 
-	_, err = cur.Execute(ctx, "begin", nil)
+	_, err = cur.Execute(ctx, "begin", nil, false)
 	require.NoError(t, err)
 
 	msg2 := msg + "2"
@@ -320,16 +319,16 @@ func assertTransactionalityAndRollbackObeyed(ctx context.Context, t *testing.T, 
 		"msg": {Type: querypb.Type_VARCHAR, Value: []byte(msg2)},
 	}
 	query = "update test_table set msg = :msg where id = :id"
-	_, err = cur.Execute(ctx, query, bindVariables)
+	_, err = cur.Execute(ctx, query, bindVariables, false)
 	require.NoError(t, err)
 
-	_, err = cur.Execute(ctx, "rollback", nil)
+	_, err = cur.Execute(ctx, "rollback", nil, false)
 	require.NoError(t, err)
 
 	bindVariables = map[string]*querypb.BindVariable{
 		"msg": {Type: querypb.Type_VARCHAR, Value: []byte(msg2)},
 	}
-	res, err = cur.Execute(ctx, "select * from test_table where msg = :msg", bindVariables)
+	res, err = cur.Execute(ctx, "select * from test_table where msg = :msg", bindVariables, false)
 	require.NoError(t, err)
 	require.Equal(t, 0, len(res.Rows))
 }

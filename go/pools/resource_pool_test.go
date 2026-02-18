@@ -83,7 +83,7 @@ func TestOpen(t *testing.T) {
 	var err error
 
 	// Test Get
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		r, err = p.Get(ctx)
 		require.NoError(t, err)
 		resources[i] = r
@@ -98,17 +98,17 @@ func TestOpen(t *testing.T) {
 	// Test that Get waits
 	ch := make(chan bool)
 	go func() {
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			r, err = p.Get(ctx)
 			require.NoError(t, err)
 			resources[i] = r
 		}
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			p.Put(resources[i])
 		}
 		ch <- true
 	}()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		// Sleep to ensure the goroutine waits
 		time.Sleep(10 * time.Millisecond)
 		p.Put(resources[i])
@@ -118,9 +118,7 @@ func TestOpen(t *testing.T) {
 	assert.Equal(t, 5, len(waitStarts))
 	// verify start times are monotonic increasing
 	for i := 1; i < len(waitStarts); i++ {
-		if waitStarts[i].Before(waitStarts[i-1]) {
-			t.Errorf("Expecting monotonic increasing start times")
-		}
+		assert.False(t, waitStarts[i].Before(waitStarts[i-1]), "Expecting monotonic increasing start times")
 	}
 	assert.NotZero(t, p.WaitTime())
 	assert.EqualValues(t, 5, lastID.Load())
@@ -133,12 +131,12 @@ func TestOpen(t *testing.T) {
 	assert.EqualValues(t, 5, count.Load())
 	assert.EqualValues(t, 6, lastID.Load())
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		r, err = p.Get(ctx)
 		require.NoError(t, err)
 		resources[i] = r
 	}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		p.Put(resources[i])
 	}
 	assert.EqualValues(t, 5, count.Load())
@@ -155,12 +153,12 @@ func TestOpen(t *testing.T) {
 	assert.EqualValues(t, 6, p.Capacity())
 	assert.EqualValues(t, 6, p.Available())
 
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		r, err = p.Get(ctx)
 		require.NoError(t, err)
 		resources[i] = r
 	}
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		p.Put(resources[i])
 	}
 	assert.EqualValues(t, 6, count.Load())
@@ -182,7 +180,7 @@ func TestShrinking(t *testing.T) {
 	p := NewResourcePool(PoolFactory, 5, 5, time.Second, 0, logWait, nil, 0)
 	var resources [10]Resource
 	// Leave one empty slot in the pool
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		var r Resource
 		var err error
 		r, err = p.Get(ctx)
@@ -195,7 +193,7 @@ func TestShrinking(t *testing.T) {
 		done <- true
 	}()
 	expected := `{"Capacity": 3, "Available": 0, "Active": 4, "InUse": 4, "MaxCapacity": 5, "WaitCount": 0, "WaitTime": 0, "IdleTimeout": 1000000000, "IdleClosed": 0, "MaxLifetimeClosed": 0, "Exhausted": 0}`
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		time.Sleep(10 * time.Millisecond)
 		stats := p.StatsJSON()
 		if stats != expected {
@@ -209,7 +207,7 @@ func TestShrinking(t *testing.T) {
 	p.Put(resources[3])
 	<-done
 	// Return the rest of the resources
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		p.Put(resources[i])
 	}
 	stats := p.StatsJSON()
@@ -220,7 +218,7 @@ func TestShrinking(t *testing.T) {
 	// Ensure no deadlock if SetCapacity is called after we start
 	// waiting for a resource
 	var err error
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		var r Resource
 		r, err = p.Get(ctx)
 		require.NoError(t, err)
@@ -242,7 +240,7 @@ func TestShrinking(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// This should not hang
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		p.Put(resources[i])
 	}
 	<-done
@@ -255,7 +253,7 @@ func TestShrinking(t *testing.T) {
 
 	// Test race condition of SetCapacity with itself
 	p.SetCapacity(3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		var r Resource
 		r, err = p.Get(ctx)
 		require.NoError(t, err)
@@ -277,7 +275,7 @@ func TestShrinking(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// This should not hang
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		p.Put(resources[i])
 	}
 	<-done
@@ -301,7 +299,7 @@ func TestClosing(t *testing.T) {
 	count.Store(0)
 	p := NewResourcePool(PoolFactory, 5, 5, time.Second, 0, logWait, nil, 0)
 	var resources [10]Resource
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		var r Resource
 		var err error
 		r, err = p.Get(ctx)
@@ -321,7 +319,7 @@ func TestClosing(t *testing.T) {
 	assert.Equal(t, expected, stats)
 
 	// Put is allowed when closing
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		p.Put(resources[i])
 	}
 
@@ -344,7 +342,7 @@ func TestReopen(t *testing.T) {
 	}
 	p := NewResourcePool(PoolFactory, 5, 5, time.Second, 0, logWait, refreshCheck, 500*time.Millisecond)
 	var resources [10]Resource
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		var r Resource
 		var err error
 		r, err = p.Get(ctx)
@@ -358,7 +356,7 @@ func TestReopen(t *testing.T) {
 	assert.Equal(t, expected, stats)
 
 	time.Sleep(650 * time.Millisecond)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		p.Put(resources[i])
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -519,7 +517,7 @@ func TestExtendedLifetimeTimeout(t *testing.T) {
 
 	// maxLifetime > 0
 	maxLifetime := 10 * time.Millisecond
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		p = NewResourcePool(PoolFactory, 5, 5, time.Second, maxLifetime, logWait, nil, 0)
 		defer p.Close()
 		assert.LessOrEqual(t, maxLifetime, p.extendedMaxLifetime())
@@ -534,9 +532,9 @@ func TestCreateFail(t *testing.T) {
 	p := NewResourcePool(FailFactory, 5, 5, time.Second, 0, logWait, nil, 0)
 	defer p.Close()
 
-	if _, err := p.Get(ctx); err.Error() != "Failed" {
-		t.Errorf("Expecting Failed, received %v", err)
-	}
+	_, err := p.Get(ctx)
+	assert.EqualError(t, err, "Failed", "Expecting Failed, received %v", err)
+
 	stats := p.StatsJSON()
 	expected := `{"Capacity": 5, "Available": 5, "Active": 0, "InUse": 0, "MaxCapacity": 5, "WaitCount": 0, "WaitTime": 0, "IdleTimeout": 1000000000, "IdleClosed": 0, "MaxLifetimeClosed": 0, "Exhausted": 0}`
 	assert.Equal(t, expected, stats)
@@ -567,13 +565,13 @@ func TestSlowCreateFail(t *testing.T) {
 	ch := make(chan bool)
 
 	// The third Get should not wait indefinitely
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		go func() {
 			p.Get(ctx)
 			ch <- true
 		}()
 	}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		<-ch
 	}
 	assert.EqualValues(t, 2, p.Available())

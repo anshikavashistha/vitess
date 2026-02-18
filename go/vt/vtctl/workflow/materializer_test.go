@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"slices"
 	"strings"
 	"testing"
@@ -56,9 +57,7 @@ const (
 	getNonEmptyTable     = "select 1 from `t1` limit 1"
 )
 
-var (
-	defaultOnDDL = binlogdatapb.OnDDLAction_IGNORE.String()
-)
+var defaultOnDDL = binlogdatapb.OnDDLAction_IGNORE.String()
 
 func gtid(position string) string {
 	arr := strings.Split(position, "/")
@@ -296,8 +295,7 @@ func TestStripAutoIncrement(t *testing.T) {
 }
 
 func TestAddTablesToVSchema(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	ts := memorytopo.NewServer(ctx, "zone1")
 	defer ts.Close()
 	srcks := "source"
@@ -510,8 +508,7 @@ func TestAddTablesToVSchema(t *testing.T) {
 }
 
 func TestMigrateVSchema(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	ms := &vtctldatapb.MaterializeSettings{
 		Workflow:       "workflow",
 		Cell:           "cell",
@@ -544,7 +541,8 @@ func TestMigrateVSchema(t *testing.T) {
 	vschema, err := env.ws.ts.GetSrvVSchema(ctx, env.cell)
 	require.NoError(t, err)
 	got := fmt.Sprintf("%v", vschema)
-	want := []string{`keyspaces:{key:"sourceks" value:{}}`,
+	want := []string{
+		`keyspaces:{key:"sourceks" value:{}}`,
 		`keyspaces:{key:"sourceks" value:{}} keyspaces:{key:"targetks" value:{tables:{key:"t1" value:{}}}}`,
 		`rules:{from_table:"t1" to_tables:"sourceks.t1"}`,
 		`rules:{from_table:"targetks.t1" to_tables:"sourceks.t1"}`,
@@ -571,8 +569,7 @@ func TestMoveTablesDDLFlag(t *testing.T) {
 
 	for onDDLAction := range binlogdatapb.OnDDLAction_value {
 		t.Run(fmt.Sprintf("OnDDL Flag:%v", onDDLAction), func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 			env := newTestMaterializerEnv(t, ctx, ms, []string{"0"}, []string{"0"})
 			defer env.close()
 			// This is the default and go does not marshal defaults
@@ -593,8 +590,6 @@ func TestMoveTablesDDLFlag(t *testing.T) {
 			require.NoError(t, err)
 			sourceShard, err := env.topoServ.GetShardNames(ctx, ms.SourceKeyspace)
 			require.NoError(t, err)
-			want := fmt.Sprintf("shard_streams:{key:\"%s/%s\" value:{streams:{id:1 tablet:{cell:\"%s\" uid:200} source_shard:\"%s/%s\" position:\"%s\" status:\"Running\" info:\"VStream Lag: 0s\"}}} traffic_state:\"Reads Not Switched. Writes Not Switched\"",
-				ms.TargetKeyspace, targetShard[0], env.cell, ms.SourceKeyspace, sourceShard[0], gtid(position))
 
 			res, err := env.ws.MoveTablesCreate(ctx, &vtctldatapb.MoveTablesCreateRequest{
 				Workflow:       ms.Workflow,
@@ -603,8 +598,29 @@ func TestMoveTablesDDLFlag(t *testing.T) {
 				IncludeTables:  []string{"t1"},
 				OnDdl:          onDDLAction,
 			})
+			key := fmt.Sprintf("%s/%s", ms.TargetKeyspace, targetShard[0])
+			want := &vtctldatapb.WorkflowStatusResponse{
+				ShardStreams: map[string]*vtctldatapb.WorkflowStatusResponse_ShardStreams{
+					key: {
+						Streams: []*vtctldatapb.WorkflowStatusResponse_ShardStreamState{
+							{
+								Id: 1,
+								Tablet: &topodatapb.TabletAlias{
+									Cell: env.cell,
+									Uid:  200,
+								},
+								SourceShard: fmt.Sprintf("%s/%s", ms.SourceKeyspace, sourceShard[0]),
+								Position:    gtid(position),
+								Status:      "Running",
+								Info:        "VStream Lag: 0s",
+							},
+						},
+					},
+				},
+				TrafficState: "Reads Not Switched. Writes Not Switched",
+			}
 			require.NoError(t, err)
-			require.Equal(t, want, fmt.Sprintf("%+v", res))
+			require.Equal(t, want, res)
 		})
 	}
 }
@@ -626,7 +642,7 @@ func TestShardedAutoIncHandling(t *testing.T) {
 		TableSettings: []*vtctldatapb.TableMaterializeSettings{{
 			TargetTable:      tableName,
 			CreateDdl:        tableDDL,
-			SourceExpression: fmt.Sprintf("select * from %s", tableName),
+			SourceExpression: "select * from " + tableName,
 		}},
 		WorkflowOptions: &vtctldatapb.WorkflowOptions{},
 	}
@@ -788,7 +804,7 @@ func TestShardedAutoIncHandling(t *testing.T) {
 						},
 						AutoIncrement: &vschemapb.AutoIncrement{ // AutoIncrement definition exists
 							Column:   "id",
-							Sequence: fmt.Sprintf("%s_non_default_seq_name", tableName),
+							Sequence: tableName + "_non_default_seq_name",
 						},
 					},
 				},
@@ -811,7 +827,7 @@ func TestShardedAutoIncHandling(t *testing.T) {
 						},
 						AutoIncrement: &vschemapb.AutoIncrement{ // AutoIncrement definition left alone
 							Column:   "id",
-							Sequence: fmt.Sprintf("%s_non_default_seq_name", tableName),
+							Sequence: tableName + "_non_default_seq_name",
 						},
 					},
 				},
@@ -890,8 +906,7 @@ func TestShardedAutoIncHandling(t *testing.T) {
 
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 			if tc.targetShards == nil {
 				tc.targetShards = []string{"0"}
 			}
@@ -957,8 +972,7 @@ func TestMoveTablesNoRoutingRules(t *testing.T) {
 		}},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	env := newTestMaterializerEnv(t, ctx, ms, []string{"0"}, []string{"0"})
 	defer env.close()
 	// This is the default and go does not marshal defaults
@@ -1014,14 +1028,215 @@ func TestMoveTablesNoRoutingRules(t *testing.T) {
 	require.Zerof(t, len(rr.Rules), "routing rules should be empty, found %+v", rr.Rules)
 }
 
+func TestMoveTablesCreateShardedVSchemaRollback(t *testing.T) {
+	ms := &vtctldatapb.MaterializeSettings{
+		Workflow:       "workflow",
+		SourceKeyspace: "sourceks",
+		TargetKeyspace: "targetks",
+		TableSettings: []*vtctldatapb.TableMaterializeSettings{{
+			TargetTable:      "t1",
+			SourceExpression: "select * from t1",
+		}},
+	}
+
+	ctx := t.Context()
+	env := newTestMaterializerEnv(t, ctx, ms, []string{"-"}, []string{"-"})
+	defer env.close()
+
+	targetVSchema := &vschemapb.Keyspace{
+		Sharded: true,
+		Vindexes: map[string]*vschemapb.Vindex{
+			"hash": {
+				Type: "hash",
+			},
+		},
+		Tables: map[string]*vschemapb.Table{
+			"t1": {
+				ColumnVindexes: []*vschemapb.ColumnVindex{{
+					Name:   "hash",
+					Column: "id",
+				}},
+			},
+		},
+	}
+	err := env.ws.ts.SaveVSchema(ctx, &topo.KeyspaceVSchemaInfo{
+		Name:     ms.TargetKeyspace,
+		Keyspace: targetVSchema,
+	})
+	require.NoError(t, err)
+
+	env.tmc.expectFetchAsAllPrivsQuery(startingTargetTabletUID, getNonEmptyTable, &sqltypes.Result{})
+
+	sourceDeleteQuery := fmt.Sprintf(sqlDeleteWorkflow, encodeString("vt_sourceks"), encodeString(ReverseWorkflowName(ms.Workflow)))
+	targetDeleteQuery := fmt.Sprintf(sqlDeleteWorkflow, encodeString("vt_targetks"), encodeString(ms.Workflow))
+	env.tmc.expectVRQuery(startingSourceTabletUID, sourceDeleteQuery, &sqltypes.Result{})
+	env.tmc.expectVRQuery(startingTargetTabletUID, targetDeleteQuery, &sqltypes.Result{})
+
+	readCalls := 0
+	env.tmc.readVReplicationWorkflow = func(ctx context.Context, tablet *topodatapb.Tablet, request *tabletmanagerdatapb.ReadVReplicationWorkflowRequest) (*tabletmanagerdatapb.ReadVReplicationWorkflowResponse, error) {
+		readCalls++
+		if readCalls == 1 {
+			return &tabletmanagerdatapb.ReadVReplicationWorkflowResponse{
+				Workflow:     request.Workflow,
+				WorkflowType: binlogdatapb.VReplicationWorkflowType_MoveTables,
+				Streams: []*tabletmanagerdatapb.ReadVReplicationWorkflowResponse_Stream{
+					{
+						Id: 1,
+						Bls: &binlogdatapb.BinlogSource{
+							Keyspace: ms.SourceKeyspace,
+							Shard:    "-",
+							Filter: &binlogdatapb.Filter{
+								Rules: []*binlogdatapb.Rule{{
+									Match:  "t1",
+									Filter: "select * from t1",
+								}},
+							},
+						},
+					},
+				},
+			}, nil
+		}
+		return nil, errors.New("read vreplication failed")
+	}
+
+	_, err = env.ws.MoveTablesCreate(ctx, &vtctldatapb.MoveTablesCreateRequest{
+		Workflow:       ms.Workflow,
+		SourceKeyspace: ms.SourceKeyspace,
+		TargetKeyspace: ms.TargetKeyspace,
+		IncludeTables:  []string{"t1"},
+	})
+	require.ErrorContains(t, err, "read vreplication failed")
+
+	got, err := env.ws.ts.GetVSchema(ctx, ms.TargetKeyspace)
+	require.NoError(t, err)
+	require.True(t, proto.Equal(got.Keyspace, targetVSchema), "got: %v, want: %v", got.Keyspace, targetVSchema)
+}
+
+func TestMoveTablesCreateUnshardedVSchemaRollback(t *testing.T) {
+	ms := &vtctldatapb.MaterializeSettings{
+		Workflow:       "workflow",
+		SourceKeyspace: "sourceks",
+		TargetKeyspace: "targetks",
+		TableSettings: []*vtctldatapb.TableMaterializeSettings{{
+			TargetTable:      "t1",
+			SourceExpression: "select * from t1",
+		}},
+	}
+
+	ctx := t.Context()
+	env := newTestMaterializerEnv(t, ctx, ms, []string{"-"}, []string{"-"})
+	defer env.close()
+
+	originalVSchema := &vschemapb.Keyspace{
+		Tables: map[string]*vschemapb.Table{
+			"t0": {},
+		},
+	}
+	err := env.ws.ts.SaveVSchema(ctx, &topo.KeyspaceVSchemaInfo{
+		Name:     ms.TargetKeyspace,
+		Keyspace: originalVSchema,
+	})
+	require.NoError(t, err)
+
+	env.tmc.expectFetchAsAllPrivsQuery(startingTargetTabletUID, getNonEmptyTable, &sqltypes.Result{})
+
+	sourceDeleteQuery := fmt.Sprintf(sqlDeleteWorkflow, encodeString("vt_sourceks"), encodeString(ReverseWorkflowName(ms.Workflow)))
+	targetDeleteQuery := fmt.Sprintf(sqlDeleteWorkflow, encodeString("vt_targetks"), encodeString(ms.Workflow))
+	env.tmc.expectVRQuery(startingSourceTabletUID, sourceDeleteQuery, &sqltypes.Result{})
+	env.tmc.expectVRQuery(startingTargetTabletUID, targetDeleteQuery, &sqltypes.Result{})
+
+	conn, err := env.ws.ts.ConnForCell(ctx, topo.GlobalCell)
+	require.NoError(t, err)
+	current, changes, err := conn.Watch(ctx, path.Join(topo.KeyspacesPath, ms.TargetKeyspace, topo.VSchemaFile))
+	require.NoError(t, err)
+	initialVersion := ""
+	if current != nil && current.Version != nil {
+		initialVersion = current.Version.String()
+	}
+
+	failCh := make(chan struct{})
+	readCalls := 0
+	env.tmc.readVReplicationWorkflow = func(ctx context.Context, tablet *topodatapb.Tablet, request *tabletmanagerdatapb.ReadVReplicationWorkflowRequest) (*tabletmanagerdatapb.ReadVReplicationWorkflowResponse, error) {
+		readCalls++
+		if readCalls == 1 {
+			return &tabletmanagerdatapb.ReadVReplicationWorkflowResponse{
+				Workflow:     request.Workflow,
+				WorkflowType: binlogdatapb.VReplicationWorkflowType_MoveTables,
+				Streams: []*tabletmanagerdatapb.ReadVReplicationWorkflowResponse_Stream{
+					{
+						Id: 1,
+						Bls: &binlogdatapb.BinlogSource{
+							Keyspace: ms.SourceKeyspace,
+							Shard:    "-",
+							Filter: &binlogdatapb.Filter{
+								Rules: []*binlogdatapb.Rule{{
+									Match:  "t1",
+									Filter: "select * from t1",
+								}},
+							},
+						},
+					},
+				},
+			}, nil
+		}
+		<-failCh
+		return nil, errors.New("read vreplication failed")
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := env.ws.MoveTablesCreate(ctx, &vtctldatapb.MoveTablesCreateRequest{
+			Workflow:       ms.Workflow,
+			SourceKeyspace: ms.SourceKeyspace,
+			TargetKeyspace: ms.TargetKeyspace,
+			IncludeTables:  []string{"t1"},
+		})
+		errCh <- err
+	}()
+
+	updatedVersion := ""
+	assert.Eventually(t, func() bool {
+		select {
+		case wd := <-changes:
+			if wd == nil || wd.Err != nil || wd.Contents == nil {
+				return false
+			}
+			ks := &vschemapb.Keyspace{}
+			if err := ks.UnmarshalVT(wd.Contents); err != nil {
+				return false
+			}
+			if ks.Tables["t1"] == nil {
+				return false
+			}
+			if wd.Version != nil {
+				updatedVersion = wd.Version.String()
+			}
+			return true
+		default:
+			return false
+		}
+	}, 5*time.Second, 50*time.Millisecond)
+	require.NotEmpty(t, updatedVersion)
+	if initialVersion != "" {
+		require.NotEqual(t, initialVersion, updatedVersion)
+	}
+
+	close(failCh)
+	err = <-errCh
+	require.ErrorContains(t, err, "read vreplication failed")
+
+	got, err := env.ws.ts.GetVSchema(ctx, ms.TargetKeyspace)
+	require.NoError(t, err)
+	require.True(t, proto.Equal(got.Keyspace, originalVSchema), "got: %v, want: %v", got.Keyspace, originalVSchema)
+}
+
 func TestCreateLookupVindexFull(t *testing.T) {
 	ms := &vtctldatapb.MaterializeSettings{
 		Workflow:       "lookup",
 		SourceKeyspace: "sourceks",
 		TargetKeyspace: "targetks",
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	env := newTestMaterializerEnv(t, ctx, ms, []string{"0"}, []string{"0"})
 	defer env.close()
@@ -1157,13 +1372,208 @@ func TestCreateLookupVindexFull(t *testing.T) {
 	utils.MustMatch(t, wantvschema, vschema.Keyspace)
 }
 
+func TestCreateLookupVindexMultipleCreate(t *testing.T) {
+	ms := &vtctldatapb.MaterializeSettings{
+		Workflow:       "lookup",
+		SourceKeyspace: "sourceks",
+		TargetKeyspace: "targetks",
+	}
+	ctx := t.Context()
+
+	env := newTestMaterializerEnv(t, ctx, ms, []string{"0"}, []string{"0"})
+	defer env.close()
+
+	specs := &vschemapb.Keyspace{
+		Vindexes: map[string]*vschemapb.Vindex{
+			"v1": {
+				Type: "lookup_unique",
+				Params: map[string]string{
+					"table": "targetks.lookup",
+					"from":  "col2",
+					"to":    "keyspace_id",
+				},
+				Owner: "t1",
+			},
+			"v2": {
+				Type: "lookup_unique",
+				Params: map[string]string{
+					"table": "targetks.lookup",
+					"from":  "col4",
+					"to":    "keyspace_id",
+				},
+				Owner: "t2",
+			},
+		},
+		Tables: map[string]*vschemapb.Table{
+			"t1": {
+				ColumnVindexes: []*vschemapb.ColumnVindex{{
+					Name:   "v1",
+					Column: "col2",
+				}},
+			},
+			"t2": {
+				ColumnVindexes: []*vschemapb.ColumnVindex{{
+					Name:   "v2",
+					Column: "col4",
+				}},
+			},
+		},
+	}
+	// Dummy sourceSchema
+	sourceSchema1 := "CREATE TABLE `t1` (\n" +
+		"  `col1` int(11) NOT NULL AUTO_INCREMENT,\n" +
+		"  `col2` int(11) DEFAULT NULL,\n" +
+		"  PRIMARY KEY (`id`)\n" +
+		") ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=latin1"
+
+	sourceSchema2 := "CREATE TABLE `t2` (\n" +
+		"  `col3` int(11) NOT NULL AUTO_INCREMENT,\n" +
+		"  `col4` int(11) DEFAULT NULL,\n" +
+		"  PRIMARY KEY (`id`)\n" +
+		") ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=latin1"
+
+	sourceVSchema := &vschemapb.Keyspace{
+		Sharded: true,
+		Vindexes: map[string]*vschemapb.Vindex{
+			"xxhash": {
+				Type: "xxhash",
+			},
+		},
+		Tables: map[string]*vschemapb.Table{
+			"t1": {
+				ColumnVindexes: []*vschemapb.ColumnVindex{{
+					Name:   "xxhash",
+					Column: "col1",
+				}},
+			},
+			"t2": {},
+		},
+	}
+	env.tmc.schema[ms.SourceKeyspace+".t1"] = &tabletmanagerdatapb.SchemaDefinition{
+		TableDefinitions: []*tabletmanagerdatapb.TableDefinition{{
+			Fields: []*querypb.Field{{
+				Name: "col1",
+				Type: querypb.Type_INT64,
+			}, {
+				Name: "col2",
+				Type: querypb.Type_INT64,
+			}},
+			Schema: sourceSchema1,
+		}},
+	}
+	env.tmc.schema[ms.SourceKeyspace+".t2"] = &tabletmanagerdatapb.SchemaDefinition{
+		TableDefinitions: []*tabletmanagerdatapb.TableDefinition{{
+			Fields: []*querypb.Field{{
+				Name: "col3",
+				Type: querypb.Type_INT64,
+			}, {
+				Name: "col4",
+				Type: querypb.Type_INT64,
+			}},
+			Schema: sourceSchema2,
+		}},
+	}
+	if err := env.topoServ.SaveVSchema(ctx, &topo.KeyspaceVSchemaInfo{
+		Name:     ms.TargetKeyspace,
+		Keyspace: &vschemapb.Keyspace{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.topoServ.SaveVSchema(ctx, &topo.KeyspaceVSchemaInfo{
+		Name:     ms.SourceKeyspace,
+		Keyspace: sourceVSchema,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	env.tmc.expectVRQuery(100, mzCheckJournal, &sqltypes.Result{})
+	env.tmc.expectFetchAsAllPrivsQuery(200, "select 1 from `lookup` limit 1", &sqltypes.Result{})
+
+	// Expect this query twice for 2 vindexes.
+	env.tmc.expectVRQuery(200, "/CREATE TABLE `lookup`", &sqltypes.Result{})
+	env.tmc.expectVRQuery(200, "/CREATE TABLE `lookup`", &sqltypes.Result{})
+
+	env.tmc.expectVRQuery(200, mzGetCopyState, &sqltypes.Result{})
+	env.tmc.expectVRQuery(200, mzGetLatestCopyState, &sqltypes.Result{})
+	env.tmc.expectVRQuery(200, insertPrefix, &sqltypes.Result{})
+	env.tmc.expectVRQuery(200, "update _vt.vreplication set state='Running' where db_name='vt_targetks' and workflow='lookup'", &sqltypes.Result{})
+
+	req := &vtctldatapb.LookupVindexCreateRequest{
+		Workflow:    ms.Workflow,
+		Keyspace:    ms.SourceKeyspace,
+		Cells:       []string{"cell"},
+		TabletTypes: []topodatapb.TabletType{topodatapb.TabletType_PRIMARY},
+		Vindex:      specs,
+	}
+
+	_, err := env.ws.LookupVindexCreate(ctx, req)
+	require.NoError(t, err)
+
+	wantvschema := &vschemapb.Keyspace{
+		Sharded: true,
+		Vindexes: map[string]*vschemapb.Vindex{
+			"xxhash": {
+				Type: "xxhash",
+			},
+			"v1": {
+				Type: "lookup_unique",
+				Params: map[string]string{
+					"table":      "targetks.lookup",
+					"from":       "col2",
+					"to":         "keyspace_id",
+					"write_only": "true",
+				},
+				Owner: "t1",
+			},
+			"v2": {
+				Type: "lookup_unique",
+				Params: map[string]string{
+					"table":      "targetks.lookup",
+					"from":       "col4",
+					"to":         "keyspace_id",
+					"write_only": "true",
+				},
+				Owner: "t2",
+			},
+		},
+		Tables: map[string]*vschemapb.Table{
+			"t1": {
+				ColumnVindexes: []*vschemapb.ColumnVindex{{
+					Name:   "xxhash",
+					Column: "col1",
+				}, {
+					Name:   "v1",
+					Column: "col2",
+				}},
+			},
+			"t2": {
+				ColumnVindexes: []*vschemapb.ColumnVindex{{
+					Name:   "v2",
+					Column: "col4",
+				}},
+			},
+		},
+	}
+	vschema, err := env.topoServ.GetVSchema(ctx, ms.SourceKeyspace)
+	require.NoError(t, err)
+	utils.MustMatch(t, wantvschema, vschema.Keyspace)
+
+	wantvschema = &vschemapb.Keyspace{
+		Tables: map[string]*vschemapb.Table{
+			"lookup": {},
+		},
+	}
+	vschema, err = env.topoServ.GetVSchema(ctx, ms.TargetKeyspace)
+	require.NoError(t, err)
+	utils.MustMatch(t, wantvschema, vschema.Keyspace)
+}
+
 func TestCreateLookupVindexCreateDDL(t *testing.T) {
 	ms := &vtctldatapb.MaterializeSettings{
 		SourceKeyspace: "sourceks",
 		TargetKeyspace: "targetks",
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	env := newTestMaterializerEnv(t, ctx, ms, []string{"0"}, []string{"0"})
 	defer env.close()
@@ -1206,7 +1616,7 @@ func TestCreateLookupVindexCreateDDL(t *testing.T) {
 				"v": {
 					Type: "lookup_unique",
 					Params: map[string]string{
-						"table": fmt.Sprintf("%s.lkp", ms.TargetKeyspace),
+						"table": ms.TargetKeyspace + ".lkp",
 						"from":  "c1",
 						"to":    "c2",
 					},
@@ -1231,7 +1641,7 @@ func TestCreateLookupVindexCreateDDL(t *testing.T) {
 						"v": {
 							Type: "lookup_unique",
 							Params: map[string]string{
-								"table":      fmt.Sprintf("%s.lkp", ms.TargetKeyspace),
+								"table":      ms.TargetKeyspace + ".lkp",
 								"from":       "c1",
 								"to":         "c2",
 								"write_only": "true", // It has not been externalized yet
@@ -1269,7 +1679,7 @@ func TestCreateLookupVindexCreateDDL(t *testing.T) {
 				"v": {
 					Type: "lookup_unique",
 					Params: map[string]string{
-						"table": fmt.Sprintf("%s.lkp", ms.TargetKeyspace),
+						"table": ms.TargetKeyspace + ".lkp",
 						"from":  "c1",
 						"to":    "c2",
 					},
@@ -1295,7 +1705,7 @@ func TestCreateLookupVindexCreateDDL(t *testing.T) {
 						"v": {
 							Type: "lookup_unique",
 							Params: map[string]string{
-								"table":      fmt.Sprintf("%s.lkp", ms.TargetKeyspace),
+								"table":      ms.TargetKeyspace + ".lkp",
 								"from":       "c1",
 								"to":         "c2",
 								"write_only": "false", // This vindex has been externalized
@@ -1321,7 +1731,7 @@ func TestCreateLookupVindexCreateDDL(t *testing.T) {
 				"v": {
 					Type: "lookup_unique",
 					Params: map[string]string{
-						"table": fmt.Sprintf("%s.lkp", ms.TargetKeyspace),
+						"table": ms.TargetKeyspace + ".lkp",
 						"from":  "c1",
 						"to":    "c2",
 					},
@@ -1369,7 +1779,7 @@ func TestCreateLookupVindexCreateDDL(t *testing.T) {
 				"v": {
 					Type: "lookup_unique",
 					Params: map[string]string{
-						"table": fmt.Sprintf("%s.lkp", ms.TargetKeyspace),
+						"table": ms.TargetKeyspace + ".lkp",
 						"from":  "c1",
 						"to":    "c2",
 					},
@@ -1401,7 +1811,7 @@ func TestCreateLookupVindexCreateDDL(t *testing.T) {
 				"v": {
 					Type: "lookup_unique",
 					Params: map[string]string{
-						"table": fmt.Sprintf("%s.lkp", ms.TargetKeyspace),
+						"table": ms.TargetKeyspace + ".lkp",
 						"from":  "c1",
 						"to":    "c2",
 					},
@@ -1435,7 +1845,7 @@ func TestCreateLookupVindexCreateDDL(t *testing.T) {
 				"v": {
 					Type: "lookup",
 					Params: map[string]string{
-						"table": fmt.Sprintf("%s.lkp", ms.TargetKeyspace),
+						"table": ms.TargetKeyspace + ".lkp",
 						"from":  "c1,c2",
 						"to":    "c3",
 					},
@@ -1470,7 +1880,7 @@ func TestCreateLookupVindexCreateDDL(t *testing.T) {
 				"v": {
 					Type: "lookup_unique",
 					Params: map[string]string{
-						"table": fmt.Sprintf("%s.lkp", ms.TargetKeyspace),
+						"table": ms.TargetKeyspace + ".lkp",
 						"from":  "c1",
 						"to":    "c2",
 					},
@@ -1500,7 +1910,7 @@ func TestCreateLookupVindexCreateDDL(t *testing.T) {
 				"v": {
 					Type: "lookup_unique",
 					Params: map[string]string{
-						"table": fmt.Sprintf("%s.lkp", ms.TargetKeyspace),
+						"table": ms.TargetKeyspace + ".lkp",
 						"from":  "c1",
 						"to":    "c2",
 					},
@@ -1562,8 +1972,7 @@ func TestCreateLookupVindexSourceVSchema(t *testing.T) {
 		SourceKeyspace: "sourceks",
 		TargetKeyspace: "targetks",
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	env := newTestMaterializerEnv(t, ctx, ms, []string{"0"}, []string{"0"})
 	defer env.close()
@@ -1808,8 +2217,7 @@ func TestCreateLookupVindexTargetVSchema(t *testing.T) {
 		SourceKeyspace: "sourceks",
 		TargetKeyspace: "targetks",
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	env := newTestMaterializerEnv(t, ctx, ms, []string{"0"}, []string{"0"})
 	defer env.close()
@@ -2059,8 +2467,7 @@ func TestCreateLookupVindexSameKeyspace(t *testing.T) {
 		SourceKeyspace: "ks",
 		TargetKeyspace: "ks",
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	env := newTestMaterializerEnv(t, ctx, ms, []string{"0"}, []string{"0"})
 	defer env.close()
@@ -2176,8 +2583,7 @@ func TestCreateCustomizedVindex(t *testing.T) {
 		SourceKeyspace: "ks",
 		TargetKeyspace: "ks",
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	env := newTestMaterializerEnv(t, ctx, ms, []string{"0"}, []string{"0"})
 	defer env.close()
@@ -2306,8 +2712,7 @@ func TestCreateLookupVindexIgnoreNulls(t *testing.T) {
 		SourceKeyspace: "ks",
 		TargetKeyspace: "ks",
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	env := newTestMaterializerEnv(t, ctx, ms, []string{"0"}, []string{"0"})
 	defer env.close()
@@ -2431,8 +2836,7 @@ func TestStopAfterCopyFlag(t *testing.T) {
 		SourceKeyspace: "ks",
 		TargetKeyspace: "ks",
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	env := newTestMaterializerEnv(t, ctx, ms, []string{"0"}, []string{"0"})
 	defer env.close()
@@ -2529,8 +2933,7 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 			},
 		},
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	env := newTestMaterializerEnv(t, ctx, ms, []string{"0"}, []string{"-80", "80-"})
 	defer env.close()
@@ -2539,7 +2942,7 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 		"v": {
 			Type: "lookup_unique",
 			Params: map[string]string{
-				"table": fmt.Sprintf("%s.t", ms.TargetKeyspace),
+				"table": ms.TargetKeyspace + ".t",
 				"from":  "c1",
 				"to":    "c2",
 			},
@@ -2555,7 +2958,7 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 			"v1": {
 				Type: "lookup_unique",
 				Params: map[string]string{
-					"table":      fmt.Sprintf("%s.t", ms.TargetKeyspace),
+					"table":      ms.TargetKeyspace + ".t",
 					"from":       "c1",
 					"to":         "c2",
 					"write_only": "true",
@@ -2593,20 +2996,6 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 		err                    string
 	}{
 		{
-			description: "dup vindex",
-			input: &vschemapb.Keyspace{
-				Vindexes: map[string]*vschemapb.Vindex{
-					"v1": {
-						Type: "xxhash",
-					},
-					"v2": {
-						Type: "xxhash",
-					},
-				},
-			},
-			err: "only one vindex must be specified",
-		},
-		{
 			description: "not a lookup",
 			input: &vschemapb.Keyspace{
 				Vindexes: map[string]*vschemapb.Vindex{
@@ -2638,7 +3027,7 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 					"v": {
 						Type: "lookup_unique",
 						Params: map[string]string{
-							"table": fmt.Sprintf("%s.t", ms.TargetKeyspace),
+							"table": ms.TargetKeyspace + ".t",
 							"from":  "c1,c2",
 							"to":    "c3",
 						},
@@ -2654,7 +3043,7 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 					"v": {
 						Type: "lookup",
 						Params: map[string]string{
-							"table": fmt.Sprintf("%s.t", ms.TargetKeyspace),
+							"table": ms.TargetKeyspace + ".t",
 							"from":  "c1",
 							"to":    "c2",
 						},
@@ -2670,7 +3059,7 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 					"v": {
 						Type: "lookup_noexist",
 						Params: map[string]string{
-							"table": fmt.Sprintf("%s.t", ms.TargetKeyspace),
+							"table": ms.TargetKeyspace + ".t",
 							"from":  "c1,c2",
 							"to":    "c2",
 						},
@@ -2684,7 +3073,7 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 			input: &vschemapb.Keyspace{
 				Vindexes: unique,
 			},
-			err: "one or two tables must be specified",
+			err: "at least one table must be specified",
 		},
 		{
 			description: "too many tables",
@@ -2694,7 +3083,7 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 					"v": {
 						Type: "lookup_unique",
 						Params: map[string]string{
-							"table": fmt.Sprintf("%s.t", ms.TargetKeyspace),
+							"table": ms.TargetKeyspace + ".t",
 							"from":  "c1",
 							"to":    "c2",
 						},
@@ -2754,7 +3143,7 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 					"v": {
 						Type: "lookup_unique",
 						Params: map[string]string{
-							"table": fmt.Sprintf("%s.t", ms.TargetKeyspace),
+							"table": ms.TargetKeyspace + ".t",
 							"from":  "c1",
 							"to":    "c2",
 						},
@@ -2769,7 +3158,7 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 					},
 				},
 			},
-			err: "vindex owner (otherTable) must match table name (t1)",
+			err: "table owner not found for vindex v",
 		},
 		{
 			description: "owner must match",
@@ -2807,7 +3196,7 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 					"xxhash": {
 						Type: "lookup_unique",
 						Params: map[string]string{
-							"table": fmt.Sprintf("%s.t", ms.TargetKeyspace),
+							"table": ms.TargetKeyspace + ".t",
 							"from":  "c1",
 							"to":    "c2",
 						},
@@ -2847,7 +3236,7 @@ func TestCreateLookupVindexFailures(t *testing.T) {
 					"v2": {
 						Type: "consistent_lookup_unique",
 						Params: map[string]string{
-							"table": fmt.Sprintf("%s.t1_lkp", ms.TargetKeyspace),
+							"table": ms.TargetKeyspace + ".t1_lkp",
 							"from":  "c1",
 							"to":    "keyspace_id",
 						},
@@ -2939,7 +3328,7 @@ func TestKeyRangesEqualOptimization(t *testing.T) {
 	table := "t1"
 	tableSettings := []*vtctldatapb.TableMaterializeSettings{{
 		TargetTable:      table,
-		SourceExpression: fmt.Sprintf("select * from %s", table),
+		SourceExpression: "select * from " + table,
 	}}
 	targetVSchema := &vschemapb.Keyspace{
 		Sharded: true,
@@ -2996,7 +3385,7 @@ func TestKeyRangesEqualOptimization(t *testing.T) {
 								Rules: []*binlogdatapb.Rule{
 									{
 										Match:  table,
-										Filter: fmt.Sprintf("select * from %s", table),
+										Filter: "select * from " + table,
 									},
 								},
 							},
@@ -3130,7 +3519,7 @@ func TestKeyRangesEqualOptimization(t *testing.T) {
 								Rules: []*binlogdatapb.Rule{
 									{
 										Match:  table,
-										Filter: fmt.Sprintf("select * from %s", table),
+										Filter: "select * from " + table,
 									},
 								},
 							},
@@ -3150,7 +3539,7 @@ func TestKeyRangesEqualOptimization(t *testing.T) {
 								Rules: []*binlogdatapb.Rule{
 									{
 										Match:  table,
-										Filter: fmt.Sprintf("select * from %s", table),
+										Filter: "select * from " + table,
 									},
 								},
 							},
@@ -3230,8 +3619,7 @@ func TestKeyRangesEqualOptimization(t *testing.T) {
 }
 
 func TestValidateEmptyTables(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	ts := memorytopo.NewServer(ctx, "zone1")
 	defer ts.Close()
 
@@ -3281,17 +3669,17 @@ func TestValidateEmptyTables(t *testing.T) {
 	require.NoError(t, err)
 
 	s1, err := ts.UpdateShardFields(ctx, ks, shard1, func(si *topo.ShardInfo) error {
-		si.Shard.PrimaryAlias = tablet1.Alias
+		si.PrimaryAlias = tablet1.Alias
 		return nil
 	})
 	require.NoError(t, err)
 	s2, err := ts.UpdateShardFields(ctx, ks, shard2, func(si *topo.ShardInfo) error {
-		si.Shard.PrimaryAlias = tablet2.Alias
+		si.PrimaryAlias = tablet2.Alias
 		return nil
 	})
 	require.NoError(t, err)
 	s3, err := ts.UpdateShardFields(ctx, ks, shard3, func(si *topo.ShardInfo) error {
-		si.Shard.PrimaryAlias = tablet3.Alias
+		si.PrimaryAlias = tablet3.Alias
 		return nil
 	})
 	require.NoError(t, err)

@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/spf13/pflag"
 	grpcbackoff "google.golang.org/grpc/backoff"
@@ -48,18 +49,27 @@ import (
 const logPrefix = "[vtadmin.cluster.resolver]"
 
 type builder struct {
+	// scheme is the URL scheme that gRPC will use to match this resolver.
+	// Historically, vtadmin used the cluster ID as the scheme, but cluster
+	// IDs may contain characters (e.g. underscores) that are not valid in a
+	// URL scheme per RFC 3986. The scheme field is derived from the cluster
+	// ID via a sanitization function that strips or replaces invalid
+	// characters.
 	scheme string
-	opts   Options
+	// clusterID is the original cluster identifier for this builder.
+	clusterID string
+	opts      Options
 
 	// for debug.Debuggable
 	m         sync.Mutex
 	resolvers []*resolver
 }
 
-// DialAddr returns the dial address for a resolver scheme and component.
+// DialAddr returns the dial address for a gRPC resolver and component.
 //
 // VtctldClientProxy and VTGateProxy should use this to ensure their Dial calls
-// use their respective discovery resolvers.
+// use their respective discovery resolvers. The resolver's scheme should be
+// safe for use in a URI (see the notes on builder.scheme).
 func DialAddr(resolver grpcresolver.Builder, component string) string {
 	return fmt.Sprintf("%s://%s/", resolver.Scheme(), component)
 }
@@ -145,11 +155,41 @@ type Options struct {
 // "{clusterID}://{vtctld|vtgate}/". Other target URL hosts will cause an error.
 // To ensure the dial address conforms to this constraint, use this package's
 // DialAddr function.
-func (opts *Options) NewBuilder(scheme string) grpcresolver.Builder {
+// NewBuilder returns a gRPC resolver.Builder for the given cluster ID.
+//
+// Historically, we used the cluster ID directly as the scheme in the dial
+// target address (e.g. "{clusterID}://vtctld"), but gRPC requires schemes
+// to conform to RFC 3986 and underscores are not a permitted character.
+// To avoid invalid URL schemes, we sanitize the cluster ID into a safe scheme
+// and stash the original cluster ID for use in debug output.
+func (opts *Options) NewBuilder(clusterID string) grpcresolver.Builder {
 	return &builder{
-		scheme: scheme,
-		opts:   *opts,
+		scheme:    sanitizeScheme(clusterID),
+		clusterID: clusterID,
+		opts:      *opts,
 	}
+}
+
+// sanitizeScheme returns a string derived from the input that is safe to use
+// as a URL scheme per RFC 3986: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ).
+// Any runes outside of this set are replaced with '-' characters. If the first
+// character is not a letter, we prefix it with 'x' to make a valid scheme.
+func sanitizeScheme(id string) string {
+	if id == "" {
+		return "vtadmin"
+	}
+	// Map runes: letters, digits, '+', '-', '.' are kept; others become '-'
+	s := strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '+' || r == '-' || r == '.' {
+			return r
+		}
+		return '-'
+	}, id)
+	// Ensure the scheme starts with a letter.
+	if s == "" || !unicode.IsLetter(rune(s[0])) {
+		s = "x" + s
+	}
+	return s
 }
 
 var defaultBackoffConfig = grpcbackoff.DefaultConfig
@@ -163,8 +203,7 @@ func (opts *Options) InstallFlags(fs *pflag.FlagSet) {
 		"repeated, comma-separated list of tags to use when discovering hosts to connect to. "+
 			"the semantics of the tags may depend on the specific discovery implementation used.")
 	fs.Var(&opts.BalancerPolicy, "grpc-balancer-policy",
-		fmt.Sprintf("Specify a load balancer policy to use for resolvers built by these options (the default grpc behavior is pick_first). Valid choices are %s",
-			strings.Join(allBalancerPolicies, ",")))
+		"Specify a load balancer policy to use for resolvers built by these options (the default grpc behavior is pick_first). Valid choices are "+strings.Join(allBalancerPolicies, ","))
 
 	fs.DurationVar(&opts.MinDiscoveryInterval, "min-rediscovery-interval", time.Second*30,
 		"Minimum amount of time to wait between successful discovery resolution calls. "+
@@ -232,8 +271,9 @@ func (b *builder) build(target grpcresolver.Target, cc grpcresolver.ClientConn, 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	r := &resolver{
-		component:       target.URL.Host,
-		cluster:         target.URL.Scheme,
+		component: target.URL.Host,
+		// use the original cluster ID (not the sanitized scheme) for debugging/logging
+		cluster:         b.clusterID,
 		discoverAddrs:   fn,
 		backoffStrategy: backoff.Get(b.opts.BackoffStrategy, b.opts.BackoffConfig),
 		opts:            b.opts,
@@ -330,17 +370,17 @@ func (r *resolver) watch() {
 		case nil:
 			switch len(state.Addresses) {
 			case 0:
-				log.Warningf("%s: found no %ss (cluster %s); updating grpc clientconn state anyway", logPrefix, r.component, r.cluster)
+				log.Warn(fmt.Sprintf("%s: found no %ss (cluster %s); updating grpc clientconn state anyway", logPrefix, r.component, r.cluster))
 			default:
-				log.Infof("%s: found %d %ss (cluster %s)", logPrefix, len(state.Addresses), r.component, r.cluster)
+				log.Info(fmt.Sprintf("%s: found %d %ss (cluster %s)", logPrefix, len(state.Addresses), r.component, r.cluster))
 			}
 
 			if updateErr := r.cc.UpdateState(*state); updateErr != nil {
-				log.Errorf("%s: failed to update %ss addresses for %s (cluster %s): %s", logPrefix, r.component, r.cluster, updateErr)
+				log.Error(fmt.Sprintf("%s: failed to update %ss addresses (cluster %s): %s", logPrefix, r.component, r.cluster, updateErr))
 				err = updateErr
 			}
 		default:
-			log.Errorf("%s: failed to resolve new addresses for %s (cluster %s): %s", logPrefix, r.component, r.cluster, err)
+			log.Error(fmt.Sprintf("%s: failed to resolve new addresses for %s (cluster %s): %s", logPrefix, r.component, r.cluster, err))
 			r.cc.ReportError(err)
 		}
 
@@ -385,7 +425,7 @@ func (r *resolver) resolve() (*grpcresolver.State, error) {
 	span.Annotate("cluster_id", r.cluster)
 	span.Annotate("component", r.component)
 
-	log.Infof("%s: resolving %ss (cluster %s)", logPrefix, r.component, r.cluster)
+	log.Info(fmt.Sprintf("%s: resolving %ss (cluster %s)", logPrefix, r.component, r.cluster))
 
 	ctx, cancel := context.WithTimeout(ctx, r.opts.DiscoveryTimeout)
 	defer cancel()

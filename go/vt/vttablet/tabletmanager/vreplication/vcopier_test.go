@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"vitess.io/vitess/go/vt/utils"
 	vttablet "vitess.io/vitess/go/vt/vttablet/common"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/vstreamer/testenv"
 
@@ -68,14 +69,13 @@ func testVcopierTestCases(t *testing.T, test func(*testing.T), cases []vcopierTe
 	}()
 
 	for _, tc := range cases {
-		tc := tc // Avoid export loop bugs.
 		// Set test flags.
 		vttablet.DefaultVReplicationConfig.ExperimentalFlags = tc.vreplicationExperimentalFlags
 		vttablet.DefaultVReplicationConfig.ParallelInsertWorkers = tc.vreplicationParallelInsertWorkers
 		// Run test case.
 		t.Run(
 			fmt.Sprintf(
-				"vreplication_experimental_flags=%d,vreplication_parallel_insert_workers=%d",
+				"%s=%d,vreplication_parallel_insert_workers=%d", utils.GetFlagVariantForTests("vreplication-experimental-flags"),
 				tc.vreplicationExperimentalFlags, tc.vreplicationParallelInsertWorkers,
 			),
 			test,
@@ -670,7 +670,6 @@ func testPlayerCopyTables(t *testing.T) {
 		})
 	}
 	cancel()
-
 }
 
 // TestPlayerCopyBigTable ensures the copy-catchup back-and-forth loop works correctly.
@@ -1065,6 +1064,7 @@ func testPlayerCopyTableContinuation(t *testing.T) {
 	expectNontxQueries(t, qh.Expect(
 		// Catchup
 		"/update _vt.vreplication set message='Picked source tablet.*",
+		"/update _vt.vreplication set state='Copying'",
 		"insert into dst1(id,val) select 1, 'insert in' from dual where (1,1) <= (6,6)",
 		"insert into dst1(id,val) select 7, 'insert out' from dual where (7,7) <= (6,6)",
 		"update dst1 set val='updated' where id=3 and (3,3) <= (6,6)",
@@ -1194,6 +1194,7 @@ func testPlayerCopyWildcardTableContinuation(t *testing.T) {
 		"/insert into _vt.vreplication",
 		"/update _vt.vreplication set state = 'Copying'",
 		"/update _vt.vreplication set message='Picked source tablet.*",
+		"/update _vt.vreplication set state='Copying'",
 	).Then(func(expect qh.ExpectationSequencer) qh.ExpectationSequencer {
 		if !optimizeInsertsEnabled {
 			expect = expect.Then(qh.Immediately("insert into dst(id,val) select 4, 'new' from dual where (4) <= (2)"))
@@ -1293,6 +1294,7 @@ func TestPlayerCopyWildcardTableContinuationWithOptimizeInserts(t *testing.T) {
 		"/insert into _vt.vreplication",
 		"/update _vt.vreplication set state = 'Copying'",
 		"/update _vt.vreplication set message='Picked source tablet.*",
+		"/update _vt.vreplication set state='Copying'",
 		// Copy
 		"insert into dst(id,val) values (3,'uncopied'), (4,'new')",
 		`/insert into _vt.copy_state .*`,
@@ -1784,7 +1786,7 @@ func supportsInvisibleColumns() bool {
 	if env.HasCapability(testenv.ServerCapabilityInvisibleColumn) {
 		return true
 	}
-	log.Infof("invisible columns not supported in %d.%d.%d", env.DBMajorVersion, env.DBMinorVersion, env.DBPatchVersion)
+	log.Info(fmt.Sprintf("invisible columns not supported in %d.%d.%d", env.DBMajorVersion, env.DBMinorVersion, env.DBPatchVersion))
 	return false
 }
 

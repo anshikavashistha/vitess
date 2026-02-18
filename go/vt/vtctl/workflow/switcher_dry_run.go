@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -353,11 +354,11 @@ func (dr *switcherDryRun) dropSourceShards(ctx context.Context) error {
 		}
 		tabletsList[si.ShardName()] = make([]string, 0)
 		for _, t := range tabletAliases {
-			tabletsList[si.ShardName()] = append(tabletsList[si.ShardName()], fmt.Sprintf("%d", t.Uid))
+			tabletsList[si.ShardName()] = append(tabletsList[si.ShardName()], strconv.FormatUint(uint64(t.Uid), 10))
 		}
 		sort.Strings(tabletsList[si.ShardName()]) // For deterministic output
 		logs = append(logs, fmt.Sprintf("cell:%s;keyspace:%s;shards:[%s]",
-			si.Shard.PrimaryAlias.Cell, si.Keyspace(), si.ShardName()), strings.Join(tabletsList[si.ShardName()], ","))
+			si.PrimaryAlias.Cell, si.Keyspace(), si.ShardName()), strings.Join(tabletsList[si.ShardName()], ","))
 	}
 	if len(logs) > 0 {
 		dr.drLog.Logf("Delete shards (and all related tablets): [%s]", strings.Join(logs, ","))
@@ -490,11 +491,11 @@ func (dr *switcherDryRun) dropTargetShards(ctx context.Context) error {
 		}
 		tabletsList[si.ShardName()] = make([]string, 0)
 		for _, t := range tabletAliases {
-			tabletsList[si.ShardName()] = append(tabletsList[si.ShardName()], fmt.Sprintf("%d", t.Uid))
+			tabletsList[si.ShardName()] = append(tabletsList[si.ShardName()], strconv.FormatUint(uint64(t.Uid), 10))
 		}
 		sort.Strings(tabletsList[si.ShardName()]) // For deterministic output
 		logs = append(logs, fmt.Sprintf("cell:%s;keyspace:%s;shards:[%s]",
-			si.Shard.PrimaryAlias.Cell, si.Keyspace(), si.ShardName()), strings.Join(tabletsList[si.ShardName()], ","))
+			si.PrimaryAlias.Cell, si.Keyspace(), si.ShardName()), strings.Join(tabletsList[si.ShardName()], ","))
 	}
 	if len(logs) > 0 {
 		dr.drLog.Logf("Delete shards (and all related tablets): [%s]", strings.Join(logs, ","))
@@ -520,7 +521,23 @@ func (dr *switcherDryRun) initializeTargetSequences(ctx context.Context, sequenc
 	// Sort keys for deterministic output.
 	sortedBackingTableNames := maps.Keys(sequencesByBackingTable)
 	slices.Sort(sortedBackingTableNames)
-	dr.drLog.Log(fmt.Sprintf("The following sequence backing tables used by tables being moved will be initialized: %s",
-		strings.Join(sortedBackingTableNames, ",")))
+
+	maxValues, err := dr.ts.getMaxSequenceValues(ctx, sequencesByBackingTable)
+	if err != nil {
+		dr.drLog.Logf("Error getting max sequence values: %v", err)
+		return err
+	}
+	curValues, err := dr.ts.getCurrentSequenceValues(ctx, sequencesByBackingTable)
+	if err != nil {
+		dr.drLog.Logf("Error getting current sequence values: %v", err)
+		return err
+	}
+
+	dr.drLog.Log("The following sequence backing tables used by tables being moved will be initialized:")
+	for _, backingTable := range sortedBackingTableNames {
+		dr.drLog.Logf("\tBacking table: %s, current value %d, new value %d",
+			backingTable, curValues[backingTable], maxValues[backingTable]+1)
+	}
+
 	return nil
 }

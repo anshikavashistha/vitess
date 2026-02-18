@@ -19,6 +19,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -29,6 +30,7 @@ import (
 	querypb "vitess.io/vitess/go/vt/proto/query"
 	vtgatepb "vitess.io/vitess/go/vt/proto/vtgate"
 	vtrpcpb "vitess.io/vitess/go/vt/proto/vtrpc"
+	"vitess.io/vitess/go/vt/sqlparser"
 	"vitess.io/vitess/go/vt/vtgate/vtgateservice"
 )
 
@@ -65,21 +67,28 @@ func (c *callerIDClient) checkCallerID(ctx context.Context, received string) (bo
 
 	receivedCallerID := callerid.EffectiveCallerIDFromContext(ctx)
 	if receivedCallerID == nil {
-		return true, fmt.Errorf("no callerid received in the query")
+		return true, errors.New("no callerid received in the query")
 	}
 
 	if !proto.Equal(receivedCallerID, expectedCallerID) {
 		return true, fmt.Errorf("callerid mismatch, got %v expected %v", receivedCallerID, expectedCallerID)
 	}
 
-	return true, fmt.Errorf("SUCCESS: callerid matches")
+	return true, errors.New("SUCCESS: callerid matches")
 }
 
-func (c *callerIDClient) Execute(ctx context.Context, mysqlCtx vtgateservice.MySQLConnection, session *vtgatepb.Session, sql string, bindVariables map[string]*querypb.BindVariable) (*vtgatepb.Session, *sqltypes.Result, error) {
+func (c *callerIDClient) Execute(
+	ctx context.Context,
+	mysqlCtx vtgateservice.MySQLConnection,
+	session *vtgatepb.Session,
+	sql string,
+	bindVariables map[string]*querypb.BindVariable,
+	prepared bool,
+) (*vtgatepb.Session, *sqltypes.Result, error) {
 	if ok, err := c.checkCallerID(ctx, sql); ok {
 		return session, nil, err
 	}
-	return c.fallbackClient.Execute(ctx, mysqlCtx, session, sql, bindVariables)
+	return c.fallbackClient.Execute(ctx, mysqlCtx, session, sql, bindVariables, prepared)
 }
 
 func (c *callerIDClient) ExecuteBatch(ctx context.Context, session *vtgatepb.Session, sqlList []string, bindVariablesList []map[string]*querypb.BindVariable) (*vtgatepb.Session, []sqltypes.QueryResponse, error) {
@@ -96,4 +105,41 @@ func (c *callerIDClient) StreamExecute(ctx context.Context, mysqlCtx vtgateservi
 		return session, err
 	}
 	return c.fallbackClient.StreamExecute(ctx, mysqlCtx, session, sql, bindVariables, callback)
+}
+
+// ExecuteMulti is part of the VTGateService interface
+func (c *callerIDClient) ExecuteMulti(ctx context.Context, mysqlCtx vtgateservice.MySQLConnection, session *vtgatepb.Session, sqlString string) (newSession *vtgatepb.Session, qrs []*sqltypes.Result, err error) {
+	queries, err := sqlparser.NewTestParser().SplitStatementToPieces(sqlString)
+	if err != nil {
+		return session, nil, err
+	}
+	var result *sqltypes.Result
+	for _, query := range queries {
+		session, result, err = c.Execute(ctx, mysqlCtx, session, query, nil, false)
+		if err != nil {
+			return session, qrs, err
+		}
+		qrs = append(qrs, result)
+	}
+	return session, qrs, nil
+}
+
+// StreamExecuteMulti is part of the VTGateService interface
+func (c *callerIDClient) StreamExecuteMulti(ctx context.Context, mysqlCtx vtgateservice.MySQLConnection, session *vtgatepb.Session, sqlString string, callback func(qr sqltypes.QueryResponse, more bool, firstPacket bool) error) (*vtgatepb.Session, error) {
+	queries, err := sqlparser.NewTestParser().SplitStatementToPieces(sqlString)
+	if err != nil {
+		return session, err
+	}
+	for idx, query := range queries {
+		firstPacket := true
+		session, err = c.StreamExecute(ctx, mysqlCtx, session, query, nil, func(result *sqltypes.Result) error {
+			err = callback(sqltypes.QueryResponse{QueryResult: result}, idx < len(queries)-1, firstPacket)
+			firstPacket = false
+			return err
+		})
+		if err != nil {
+			return session, err
+		}
+	}
+	return session, nil
 }

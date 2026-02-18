@@ -30,6 +30,7 @@ import (
 	"vitess.io/vitess/go/vt/topotools"
 	"vitess.io/vitess/go/vt/vtctl/reparentutil/policy"
 	"vitess.io/vitess/go/vt/vtctl/reparentutil/reparenttestutil"
+	vtorcconfig "vitess.io/vitess/go/vt/vtorc/config"
 	"vitess.io/vitess/go/vt/vtorc/db"
 	"vitess.io/vitess/go/vt/vtorc/inst"
 )
@@ -38,17 +39,21 @@ var (
 	keyspaceDurabilityNone = &topodatapb.Keyspace{
 		KeyspaceType:     topodatapb.KeyspaceType_NORMAL,
 		DurabilityPolicy: policy.DurabilityNone,
+		VtorcState:       vtorcconfig.DefaultKeyspaceTopoConfig,
 	}
 	keyspaceDurabilitySemiSync = &topodatapb.Keyspace{
 		KeyspaceType:     topodatapb.KeyspaceType_NORMAL,
 		DurabilityPolicy: policy.DurabilitySemiSync,
+		VtorcState:       vtorcconfig.DefaultKeyspaceTopoConfig,
 	}
 	keyspaceDurabilityTest = &topodatapb.Keyspace{
 		KeyspaceType:     topodatapb.KeyspaceType_NORMAL,
 		DurabilityPolicy: policy.DurabilityTest,
+		VtorcState:       vtorcconfig.DefaultKeyspaceTopoConfig,
 	}
 	keyspaceSnapshot = &topodatapb.Keyspace{
 		KeyspaceType: topodatapb.KeyspaceType_SNAPSHOT,
+		VtorcState:   vtorcconfig.DefaultKeyspaceTopoConfig,
 	}
 )
 
@@ -66,8 +71,7 @@ func TestRefreshAllKeyspaces(t *testing.T) {
 		db.ClearVTOrcDatabase()
 	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	ts = memorytopo.NewServer(ctx, "zone1")
 	keyspaceNames := []string{"ks1", "ks2", "ks3", "ks4"}
 	keyspaces := []*topodatapb.Keyspace{keyspaceDurabilityNone, keyspaceDurabilitySemiSync, keyspaceSnapshot, keyspaceDurabilityTest}
@@ -150,24 +154,34 @@ func TestRefreshKeyspace(t *testing.T) {
 				KeyspaceType:     topodatapb.KeyspaceType_NORMAL,
 				DurabilityPolicy: policy.DurabilitySemiSync,
 			},
-			keyspaceWanted: nil,
-			err:            "",
+			keyspaceWanted: &topodatapb.Keyspace{
+				KeyspaceType:     topodatapb.KeyspaceType_NORMAL,
+				DurabilityPolicy: policy.DurabilitySemiSync,
+				VtorcState:       vtorcconfig.DefaultKeyspaceTopoConfig,
+			},
+			err: "",
 		}, {
 			name:         "Success with keyspaceType and no durability",
 			keyspaceName: "ks2",
 			keyspace: &topodatapb.Keyspace{
 				KeyspaceType: topodatapb.KeyspaceType_NORMAL,
 			},
-			keyspaceWanted: nil,
-			err:            "",
+			keyspaceWanted: &topodatapb.Keyspace{
+				KeyspaceType: topodatapb.KeyspaceType_NORMAL,
+				VtorcState:   vtorcconfig.DefaultKeyspaceTopoConfig,
+			},
+			err: "",
 		}, {
 			name:         "Success with snapshot keyspaceType",
 			keyspaceName: "ks3",
 			keyspace: &topodatapb.Keyspace{
 				KeyspaceType: topodatapb.KeyspaceType_SNAPSHOT,
 			},
-			keyspaceWanted: nil,
-			err:            "",
+			keyspaceWanted: &topodatapb.Keyspace{
+				KeyspaceType: topodatapb.KeyspaceType_SNAPSHOT,
+				VtorcState:   vtorcconfig.DefaultKeyspaceTopoConfig,
+			},
+			err: "",
 		}, {
 			name:         "Success with fields that are not stored",
 			keyspaceName: "ks4",
@@ -179,6 +193,7 @@ func TestRefreshKeyspace(t *testing.T) {
 			keyspaceWanted: &topodatapb.Keyspace{
 				KeyspaceType:     topodatapb.KeyspaceType_NORMAL,
 				DurabilityPolicy: policy.DurabilityNone,
+				VtorcState:       vtorcconfig.DefaultKeyspaceTopoConfig,
 			},
 			err: "",
 		}, {
@@ -195,8 +210,7 @@ func TestRefreshKeyspace(t *testing.T) {
 				tt.keyspaceWanted = tt.keyspace
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 
 			ts = memorytopo.NewServer(ctx, "zone1")
 			if tt.keyspace != nil {
@@ -276,8 +290,7 @@ func TestRefreshShard(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 
 			ts = memorytopo.NewServer(ctx, "zone1")
 			if tt.shard != nil {
@@ -310,4 +323,45 @@ func verifyPrimaryAlias(t *testing.T, keyspaceName, shardName string, primaryAli
 	}
 	require.NoError(t, err)
 	require.Equal(t, primaryAliasWanted, primaryAlias)
+}
+
+func TestRefreshAllShards(t *testing.T) {
+	// Store the old flags and restore on test completion
+	oldClustersToWatch := clustersToWatch
+	oldTs := ts
+	defer func() {
+		clustersToWatch = oldClustersToWatch
+		ts = oldTs
+		db.ClearVTOrcDatabase()
+	}()
+
+	ctx := context.Background()
+	ts = memorytopo.NewServer(ctx, "zone1")
+	require.NoError(t, initializeShardsToWatch())
+	require.NoError(t, ts.CreateKeyspace(ctx, "ks1", keyspaceDurabilityNone))
+	shards := []string{"-40", "40-80", "80-c0", "c0-"}
+	for _, shard := range shards {
+		require.NoError(t, ts.CreateShard(ctx, "ks1", shard))
+	}
+
+	// test shard refresh
+	require.NoError(t, refreshAllShards(ctx, "ks1"))
+	shardNames, err := inst.ReadShardNames("ks1")
+	require.NoError(t, err)
+	require.Equal(t, []string{"-40", "40-80", "80-c0", "c0-"}, shardNames)
+
+	// test topo shard delete propagates
+	require.NoError(t, ts.DeleteShard(ctx, "ks1", "c0-"))
+	require.NoError(t, refreshAllShards(ctx, "ks1"))
+	shardNames, err = inst.ReadShardNames("ks1")
+	require.NoError(t, err)
+	require.Equal(t, []string{"-40", "40-80", "80-c0"}, shardNames)
+
+	// test clustersToWatch filters what shards are saved
+	clustersToWatch = []string{"ks1/-80"}
+	require.NoError(t, initializeShardsToWatch())
+	require.NoError(t, refreshAllShards(ctx, "ks1"))
+	shardNames, err = inst.ReadShardNames("ks1")
+	require.NoError(t, err)
+	require.Equal(t, []string{"-40", "40-80"}, shardNames)
 }

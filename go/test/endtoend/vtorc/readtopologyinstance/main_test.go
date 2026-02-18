@@ -24,7 +24,9 @@ import (
 
 	"vitess.io/vitess/go/test/endtoend/cluster"
 	"vitess.io/vitess/go/test/endtoend/vtorc/utils"
+	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
 	"vitess.io/vitess/go/vt/servenv"
+
 	"vitess.io/vitess/go/vt/vtorc/config"
 	"vitess.io/vitess/go/vt/vtorc/inst"
 	"vitess.io/vitess/go/vt/vtorc/logic"
@@ -49,11 +51,18 @@ func TestReadTopologyInstanceBufferable(t *testing.T) {
 	}()
 
 	// Change the args such that they match how we would invoke VTOrc
-	os.Args = []string{"vtorc",
-		"--topo_global_server_address", clusterInfo.ClusterInstance.VtctldClientProcess.TopoGlobalAddress,
-		"--topo_implementation", clusterInfo.ClusterInstance.VtctldClientProcess.TopoImplementation,
-		"--topo_global_root", clusterInfo.ClusterInstance.VtctldClientProcess.TopoGlobalRoot,
+	args := map[string]string{
+		"--cell":                       clusterInfo.ClusterInstance.Cell,
+		"--topo-global-server-address": clusterInfo.ClusterInstance.VtctldClientProcess.TopoGlobalAddress,
+		"--topo-implementation":        clusterInfo.ClusterInstance.VtctldClientProcess.TopoImplementation,
+		"--topo-global-root":           clusterInfo.ClusterInstance.VtctldClientProcess.TopoGlobalRoot,
 	}
+
+	os.Args = []string{"vtorc"}
+	for k, v := range args {
+		os.Args = append(os.Args, k, v)
+	}
+
 	servenv.ParseFlags("vtorc")
 	config.SetInstancePollTime(1 * time.Second)
 	config.MarkConfigurationLoaded()
@@ -74,6 +83,7 @@ func TestReadTopologyInstanceBufferable(t *testing.T) {
 	require.NotNil(t, primaryInstance)
 	assert.Equal(t, utils.Hostname, primaryInstance.Hostname)
 	assert.Equal(t, primary.MySQLPort, primaryInstance.Port)
+	assert.Equal(t, topodatapb.TabletType_PRIMARY, primaryInstance.TabletType)
 	assert.Contains(t, primaryInstance.InstanceAlias, "zone1")
 	assert.NotEqual(t, 0, primaryInstance.ServerID)
 	assert.Greater(t, len(primaryInstance.ServerUUID), 10)
@@ -110,7 +120,8 @@ func TestReadTopologyInstanceBufferable(t *testing.T) {
 	// After this we restart the replication and enable the recoveries again.
 	err = logic.DisableRecovery()
 	require.NoError(t, err)
-	err = utils.RunSQLs(t, []string{`STOP REPLICA;`,
+	err = utils.RunSQLs(t, []string{
+		`STOP REPLICA;`,
 		`SET GTID_NEXT="12345678-1234-1234-1234-123456789012:1";`,
 		`BEGIN;`, `COMMIT;`,
 		`SET GTID_NEXT="AUTOMATIC";`,
@@ -125,6 +136,7 @@ func TestReadTopologyInstanceBufferable(t *testing.T) {
 	require.NotNil(t, replicaInstance)
 	assert.Equal(t, utils.Hostname, replicaInstance.Hostname)
 	assert.Equal(t, replica.MySQLPort, replicaInstance.Port)
+	assert.Equal(t, topodatapb.TabletType_REPLICA, replicaInstance.TabletType)
 	assert.Contains(t, replicaInstance.InstanceAlias, "zone1")
 	assert.NotEqual(t, 0, replicaInstance.ServerID)
 	assert.Greater(t, len(replicaInstance.ServerUUID), 10)

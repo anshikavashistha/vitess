@@ -23,6 +23,8 @@ package dbconfigs
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 
 	"github.com/spf13/pflag"
 
@@ -31,6 +33,7 @@ import (
 	"vitess.io/vitess/go/vt/log"
 	vtrpcpb "vitess.io/vitess/go/vt/proto/vtrpc"
 	"vitess.io/vitess/go/vt/servenv"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vterrors"
 	"vitess.io/vitess/go/vt/vttls"
 	"vitess.io/vitess/go/yaml2"
@@ -48,6 +51,7 @@ const (
 	Filtered     = "filtered"
 	Repl         = "repl"
 	ExternalRepl = "erepl"
+	Clone        = "clone"
 )
 
 var (
@@ -55,7 +59,7 @@ var (
 	GlobalDBConfigs DBConfigs
 
 	// All can be used to register all flags: RegisterFlags(All...)
-	All = []string{App, AppDebug, AllPrivs, Dba, Filtered, Repl, ExternalRepl}
+	All = []string{App, AppDebug, AllPrivs, Dba, Filtered, Repl, ExternalRepl, Clone}
 )
 
 // DBConfigs stores all the data needed to build various connection
@@ -90,12 +94,13 @@ type DBConfigs struct {
 	DBName                     string        `json:"dbName,omitempty"`
 	EnableQueryInfo            bool          `json:"enableQueryInfo,omitempty"`
 
-	App          UserConfig `json:"app,omitempty"`
-	Dba          UserConfig `json:"dba,omitempty"`
-	Filtered     UserConfig `json:"filtered,omitempty"`
-	Repl         UserConfig `json:"repl,omitempty"`
-	Appdebug     UserConfig `json:"appdebug,omitempty"`
-	Allprivs     UserConfig `json:"allprivs,omitempty"`
+	App          UserConfig `json:"app"`
+	Dba          UserConfig `json:"dba"`
+	Filtered     UserConfig `json:"filtered"`
+	Repl         UserConfig `json:"repl"`
+	Appdebug     UserConfig `json:"appdebug"`
+	Allprivs     UserConfig `json:"allprivs"`
+	CloneUser    UserConfig `json:"clone"`
 	externalRepl UserConfig
 
 	appParams          mysql.ConnParams
@@ -104,6 +109,7 @@ type DBConfigs struct {
 	replParams         mysql.ConnParams
 	appdebugParams     mysql.ConnParams
 	allprivsParams     mysql.ConnParams
+	cloneParams        mysql.ConnParams
 	externalReplParams mysql.ConnParams
 }
 
@@ -130,32 +136,35 @@ func RegisterFlags(userKeys ...string) {
 }
 
 func registerBaseFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&GlobalDBConfigs.Socket, "db_socket", "", "The unix socket to connect on. If this is specified, host and port will not be used.")
-	fs.StringVar(&GlobalDBConfigs.Host, "db_host", "", "The host name for the tcp connection.")
-	fs.IntVar(&GlobalDBConfigs.Port, "db_port", 0, "tcp port")
-	fs.StringVar(&GlobalDBConfigs.Charset, "db_charset", "utf8mb4", "Character set/collation used for this tablet. Make sure to configure this to a charset/collation supported by the lowest MySQL version in your environment.")
-	fs.Uint64Var(&GlobalDBConfigs.Flags, "db_flags", 0, "Flag values as defined by MySQL.")
-	fs.StringVar(&GlobalDBConfigs.Flavor, "db_flavor", "", "Flavor overrid. Valid value is FilePos.")
-	fs.Var(&GlobalDBConfigs.SslMode, "db_ssl_mode", "SSL mode to connect with. One of disabled, preferred, required, verify_ca & verify_identity.")
-	fs.StringVar(&GlobalDBConfigs.SslCa, "db_ssl_ca", "", "connection ssl ca")
-	fs.StringVar(&GlobalDBConfigs.SslCaPath, "db_ssl_ca_path", "", "connection ssl ca path")
-	fs.StringVar(&GlobalDBConfigs.SslCert, "db_ssl_cert", "", "connection ssl certificate")
-	fs.StringVar(&GlobalDBConfigs.SslKey, "db_ssl_key", "", "connection ssl key")
-	fs.StringVar(&GlobalDBConfigs.TLSMinVersion, "db_tls_min_version", "", "Configures the minimal TLS version negotiated when SSL is enabled. Defaults to TLSv1.2. Options: TLSv1.0, TLSv1.1, TLSv1.2, TLSv1.3.")
-	fs.StringVar(&GlobalDBConfigs.ServerName, "db_server_name", "", "server name of the DB we are connecting to.")
-	fs.IntVar(&GlobalDBConfigs.ConnectTimeoutMilliseconds, "db_connect_timeout_ms", 0, "connection timeout to mysqld in milliseconds (0 for no timeout)")
-	fs.BoolVar(&GlobalDBConfigs.EnableQueryInfo, "db_conn_query_info", false, "enable parsing and processing of QUERY_OK info fields")
+	utils.SetFlagStringVar(fs, &GlobalDBConfigs.Socket, "db-socket", "", "The unix socket to connect on. If this is specified, host and port will not be used.")
+	utils.SetFlagStringVar(fs, &GlobalDBConfigs.Host, "db-host", "", "The host name for the tcp connection.")
+	utils.SetFlagIntVar(fs, &GlobalDBConfigs.Port, "db-port", 0, "tcp port")
+	utils.SetFlagStringVar(fs, &GlobalDBConfigs.Charset, "db-charset", "utf8mb4", "Character set/collation used for this tablet. Make sure to configure this to a charset/collation supported by the lowest MySQL version in your environment.")
+	utils.SetFlagUint64Var(fs, &GlobalDBConfigs.Flags, "db-flags", 0, "Flag values as defined by MySQL.")
+	utils.SetFlagStringVar(fs, &GlobalDBConfigs.Flavor, "db-flavor", "", "Flavor overrid. Valid value is FilePos.")
+	utils.SetFlagVar(fs, &GlobalDBConfigs.SslMode, "db-ssl-mode", "SSL mode to connect with. One of disabled, preferred, required, verify_ca & verify_identity.")
+	utils.SetFlagStringVar(fs, &GlobalDBConfigs.SslCa, "db-ssl-ca", "", "connection ssl ca")
+	utils.SetFlagStringVar(fs, &GlobalDBConfigs.SslCaPath, "db-ssl-ca-path", "", "connection ssl ca path")
+	utils.SetFlagStringVar(fs, &GlobalDBConfigs.SslCert, "db-ssl-cert", "", "connection ssl certificate")
+	utils.SetFlagStringVar(fs, &GlobalDBConfigs.SslKey, "db-ssl-key", "", "connection ssl key")
+	utils.SetFlagStringVar(fs, &GlobalDBConfigs.TLSMinVersion, "db-tls-min-version", "", "Configures the minimal TLS version negotiated when SSL is enabled. Defaults to TLSv1.2. Options: TLSv1.0, TLSv1.1, TLSv1.2, TLSv1.3.")
+	utils.SetFlagStringVar(fs, &GlobalDBConfigs.ServerName, "db-server-name", "", "server name of the DB we are connecting to.")
+	utils.SetFlagIntVar(fs, &GlobalDBConfigs.ConnectTimeoutMilliseconds, "db-connect-timeout-ms", 0, "connection timeout to mysqld in milliseconds (0 for no timeout)")
+	utils.SetFlagBoolVar(fs, &GlobalDBConfigs.EnableQueryInfo, "db-conn-query-info", false, "enable parsing and processing of QUERY_OK info fields")
 }
 
 // The flags will change the global singleton
 func registerPerUserFlags(fs *pflag.FlagSet, userKey string, uc *UserConfig, cp *mysql.ConnParams) {
-	newUserFlag := "db_" + userKey + "_user"
-	fs.StringVar(&uc.User, newUserFlag, "vt_"+userKey, "db "+userKey+" user userKey")
+	newUserFlag := "db-" + userKey + "-user"
+	utils.SetFlagStringVar(fs, &uc.User, newUserFlag, "vt_"+userKey, "db "+userKey+" user userKey")
+	// fs.StringVar(&uc.User, newUserFlag, "vt_"+userKey, "db "+userKey+" user userKey")
 
-	newPasswordFlag := "db_" + userKey + "_password"
-	fs.StringVar(&uc.Password, newPasswordFlag, "", "db "+userKey+" password")
+	newPasswordFlag := "db-" + userKey + "-password"
+	utils.SetFlagStringVar(fs, &uc.Password, newPasswordFlag, "", "db "+userKey+" password")
+	// fs.StringVar(&uc.Password, newPasswordFlag, "", "db "+userKey+" password")
 
-	fs.BoolVar(&uc.UseSSL, "db_"+userKey+"_use_ssl", true, "Set this flag to false to make the "+userKey+" connection to not use ssl")
+	utils.SetFlagBoolVar(fs, &uc.UseSSL, "db-"+userKey+"-use-ssl", true, "Set this flag to false to make the "+userKey+" connection to not use ssl")
+	// fs.BoolVar(&uc.UseSSL, "db_"+userKey+"_use_ssl", true, "Set this flag to false to make the "+userKey+" connection to not use ssl")
 }
 
 // Connector contains Connection Parameters for mysql connection
@@ -257,6 +266,11 @@ func (dbcfgs *DBConfigs) ExternalReplWithDB() Connector {
 	return params
 }
 
+// CloneConnector returns connection parameters for clone with no dbname set.
+func (dbcfgs *DBConfigs) CloneConnector() Connector {
+	return dbcfgs.makeParams(&dbcfgs.cloneParams, false)
+}
+
 // AppWithDB returns connection parameters for app with dbname set.
 func (dbcfgs *DBConfigs) makeParams(cp *mysql.ConnParams, withDB bool) Connector {
 	result := *cp
@@ -302,6 +316,7 @@ func (dbcfgs *DBConfigs) Redacted() *DBConfigs {
 	dbcfgs.Repl.Password = "****"
 	dbcfgs.Appdebug.Password = "****"
 	dbcfgs.Allprivs.Password = "****"
+	dbcfgs.CloneUser.Password = "****"
 	return dbcfgs
 }
 
@@ -341,7 +356,7 @@ func (dbcfgs *DBConfigs) InitWithSocket(defaultSocketFile string, collationEnv *
 		if dbcfgs.Charset != "" && cp.Charset == collations.Unknown {
 			ch, err := collationEnv.ParseConnectionCharset(dbcfgs.Charset)
 			if err != nil {
-				log.Warningf("Error parsing charset %s: %v", dbcfgs.Charset, err)
+				log.Warn(fmt.Sprintf("Error parsing charset %s: %v", dbcfgs.Charset, err))
 				ch = collationEnv.DefaultConnectionCharset()
 			}
 			cp.Charset = ch
@@ -369,7 +384,7 @@ func (dbcfgs *DBConfigs) InitWithSocket(defaultSocketFile string, collationEnv *
 		}
 	}
 
-	log.Infof("DBConfigs: %v\n", dbcfgs.String())
+	log.Info(fmt.Sprintf("DBConfigs: %v\n", dbcfgs.String()))
 }
 
 func (dbcfgs *DBConfigs) getParams(userKey string) (*UserConfig, *mysql.ConnParams) {
@@ -397,8 +412,12 @@ func (dbcfgs *DBConfigs) getParams(userKey string) (*UserConfig, *mysql.ConnPara
 	case ExternalRepl:
 		uc = &dbcfgs.externalRepl
 		cp = &dbcfgs.externalReplParams
+	case Clone:
+		uc = &dbcfgs.CloneUser
+		cp = &dbcfgs.cloneParams
 	default:
-		log.Exitf("Invalid db user key requested: %s", userKey)
+		log.Error("Invalid db user key requested: " + userKey)
+		os.Exit(1)
 	}
 	return uc, cp
 }
@@ -419,6 +438,7 @@ func NewTestDBConfigs(genParams, appDebugParams mysql.ConnParams, dbname string)
 		dbaParams:          genParams,
 		filteredParams:     genParams,
 		replParams:         genParams,
+		cloneParams:        genParams,
 		externalReplParams: genParams,
 		DBName:             dbname,
 		Charset:            "",

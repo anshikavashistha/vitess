@@ -33,6 +33,8 @@ import (
 	"vitess.io/vitess/go/protoutil"
 	"vitess.io/vitess/go/vt/topo"
 	"vitess.io/vitess/go/vt/vtenv"
+	"vitess.io/vitess/go/vt/vterrors"
+	"vitess.io/vitess/go/vt/vttablet/grpctmclient"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/connpool"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/tabletenv"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/throttle/base"
@@ -42,6 +44,7 @@ import (
 
 	tabletmanagerdatapb "vitess.io/vitess/go/vt/proto/tabletmanagerdata"
 	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
+	vtrpcpb "vitess.io/vitess/go/vt/proto/vtrpc"
 )
 
 var (
@@ -169,8 +172,7 @@ func (c *fakeTMClient) AppNames() []string {
 	return c.appNames
 }
 
-type FakeTopoServer struct {
-}
+type FakeTopoServer struct{}
 
 func (ts *FakeTopoServer) GetTablet(ctx context.Context, alias *topodatapb.TabletAlias) (*topo.TabletInfo, error) {
 	tabletType := topodatapb.TabletType_PRIMARY
@@ -252,6 +254,7 @@ func waitForMetricsToBeCollected(t *testing.T, ctx context.Context, throttler *T
 		}
 	}
 }
+
 func sleepTillThresholdApplies() {
 	time.Sleep(time.Second)
 }
@@ -317,7 +320,7 @@ func newTestThrottler() *Throttler {
 		}
 		return selfMetrics
 	}
-	throttler.ThrottleApp(throttlerapp.TestingAlwaysThrottlerName.String(), time.Now().Add(time.Hour*24*365*10), DefaultThrottleRatio, false)
+	throttler.ThrottleApp(throttlerapp.TestingAlwaysThrottledName.String(), time.Now().Add(time.Hour*24*365*10), DefaultThrottleRatio, false)
 
 	return throttler
 }
@@ -837,6 +840,139 @@ func TestApplyThrottlerConfigAppCheckedMetrics(t *testing.T) {
 	})
 }
 
+func TestIsTabletRPCError(t *testing.T) {
+	c := grpctmclient.NewClient()
+
+	// simulate an RPC cancellation using .CheckThrottler().
+	t.Run("CANCELLED", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // cancel before check
+
+		_, err := c.CheckThrottler(ctx, &topodatapb.Tablet{
+			Hostname: "this.should.fail",
+			PortMap: map[string]int32{
+				"grpc": 12345,
+			},
+		}, &tabletmanagerdatapb.CheckThrottlerRequest{})
+		require.Equal(t, vtrpcpb.Code_CANCELED, vterrors.Code(err))
+		require.True(t, base.IsTabletRPCError(err))
+	})
+
+	// simulate an RPC failure (dial error) using .CheckThrottler() to a host we cannot resolve.
+	t.Run("DEADLINE_EXCEEDED", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+
+		_, err := c.CheckThrottler(ctx, &topodatapb.Tablet{
+			Hostname: "this.should.fail",
+			PortMap: map[string]int32{
+				"grpc": 12345,
+			},
+		}, &tabletmanagerdatapb.CheckThrottlerRequest{})
+		require.Equal(t, vtrpcpb.Code_DEADLINE_EXCEEDED, vterrors.Code(err))
+		require.True(t, base.IsTabletRPCError(err))
+		require.ErrorContains(t, err, "rpc error: code = DeadlineExceeded desc = latest balancer error: connection error")
+	})
+
+	// simulate hypothetical NOT_FOUND RPC failure.
+	t.Run("NOT_FOUND", func(t *testing.T) {
+		nonDialErr := vterrors.New(vtrpcpb.Code_NOT_FOUND, "rpc error: code = NotFound desc = method not found")
+		require.True(t, base.IsTabletRPCError(nonDialErr))
+	})
+}
+
+func TestProbeWithUnavailableHost(t *testing.T) {
+	throttler := Throttler{
+		throttledApps:   cache.New(cache.NoExpiration, 0),
+		heartbeatWriter: &FakeHeartbeatWriter{},
+	}
+
+	alias := &topodatapb.TabletAlias{
+		Cell: "cell1",
+		Uid:  100,
+	}
+
+	// The hostname used here is not routable, so the connection will fail.
+	tablet := &topo.TabletInfo{
+		Tablet: &topodatapb.Tablet{
+			Alias:         alias,
+			Hostname:      "192.0.2.0",
+			MysqlHostname: "192.0.2.0",
+			MysqlPort:     3306,
+			PortMap:       map[string]int32{"grpc": 5000},
+			Type:          topodatapb.TabletType_PRIMARY,
+		},
+	}
+
+	probe := &base.Probe{
+		Alias:       "cell1-100",
+		Tablet:      tablet.Tablet,
+		CacheMillis: 100,
+	}
+
+	tmClient := grpctmclient.NewClient()
+
+	probeFunc := throttler.generateTabletProbeFunction(base.ShardScope, probe)
+
+	metrics := probeFunc(t.Context(), tmClient)
+	require.True(t, base.IsTabletRPCError(metrics["custom"].Err))
+
+	tabletResultsMap := base.TabletResultMap{
+		"cell1-100": base.MetricResultMap{
+			"custom": metrics["custom"],
+		},
+	}
+
+	worstMetric := base.AggregateTabletMetricResults("custom", tabletResultsMap, 0, true, 0.0)
+	require.Equal(t, base.NoHostsMetricResult, worstMetric)
+}
+
+func TestProbeWithEmptyHostAndPort(t *testing.T) {
+	throttler := Throttler{
+		throttledApps:   cache.New(cache.NoExpiration, 0),
+		heartbeatWriter: &FakeHeartbeatWriter{},
+	}
+
+	alias := &topodatapb.TabletAlias{
+		Cell: "cell1",
+		Uid:  100,
+	}
+
+	// The hostname used here is not routable, so the connection will fail.
+	tablet := &topo.TabletInfo{
+		Tablet: &topodatapb.Tablet{
+			Alias:         alias,
+			Hostname:      "",
+			MysqlHostname: "192.0.2.0",
+			MysqlPort:     3306,
+			PortMap:       map[string]int32{"grpc": 0},
+			Type:          topodatapb.TabletType_PRIMARY,
+		},
+	}
+
+	probe := &base.Probe{
+		Alias:       "cell1-100",
+		Tablet:      tablet.Tablet,
+		CacheMillis: 100,
+	}
+
+	tmClient := grpctmclient.NewClient()
+
+	probeFunc := throttler.generateTabletProbeFunction(base.ShardScope, probe)
+
+	metrics := probeFunc(t.Context(), tmClient)
+	require.True(t, base.IsTabletRPCError(metrics["custom"].Err))
+
+	tabletResultsMap := base.TabletResultMap{
+		"cell1-100": base.MetricResultMap{
+			"custom": metrics["custom"],
+		},
+	}
+
+	worstMetric := base.AggregateTabletMetricResults("custom", tabletResultsMap, 0, true, 0.0)
+	require.Equal(t, base.NoHostsMetricResult, worstMetric)
+}
+
 func TestIsAppThrottled(t *testing.T) {
 	plusOneHour := time.Now().Add(time.Hour)
 	throttler := Throttler{
@@ -1235,10 +1371,7 @@ func runThrottler(t *testing.T, ctx context.Context, throttler *Throttler, timeo
 	wg2 := throttler.Enable()
 	assert.Nil(t, wg2)
 
-	sleepTime := 3 * time.Second
-	if timeout/2 < sleepTime {
-		sleepTime = timeout / 2
-	}
+	sleepTime := min(timeout/2, 3*time.Second)
 	if f != nil {
 		select {
 		case <-ctx.Done():
@@ -1648,7 +1781,7 @@ func TestDormant(t *testing.T) {
 			select {
 			case <-ctx.Done():
 				require.FailNow(t, "context expired before testing completed")
-			case <-time.After(throttler.dormantPeriod):
+			case <-time.After(throttler.dormantPeriod + 2*recentCheckRateLimiterInterval):
 				assert.True(t, throttler.isDormant())
 			}
 		}()

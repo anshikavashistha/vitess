@@ -35,6 +35,7 @@ import (
 
 	"vitess.io/vitess/go/mysql"
 	"vitess.io/vitess/go/mysql/capabilities"
+	"vitess.io/vitess/go/netutil"
 	"vitess.io/vitess/go/vt/log"
 	"vitess.io/vitess/go/vt/mysqlctl/backupstorage"
 	tabletmanagerdatapb "vitess.io/vitess/go/vt/proto/tabletmanagerdata"
@@ -59,7 +60,7 @@ var (
 	// use when checking if we need to create the directory on the local filesystem or not.
 	knownObjectStoreParams = []string{"s3BucketName", "osBucketName", "azureContainerName"}
 
-	MySQLShellPreCheckError = errors.New("MySQLShellPreCheckError")
+	ErrMySQLShellPreCheck = errors.New("ErrMySQLShellPreCheck")
 
 	// internal databases not backed up by MySQL Shell
 	internalDBs = []string{
@@ -204,6 +205,12 @@ func (be *MySQLShellBackupEngine) ExecuteBackup(ctx context.Context, params Back
 	}
 	defer closeFile(mwc, backupManifestFileName, params.Logger, &finalErr)
 
+	// Get the hostname
+	hostname, err := netutil.FullyQualifiedHostname()
+	if err != nil {
+		hostname = ""
+	}
+
 	// JSON-encode and write the MANIFEST
 	bm := &MySQLShellBackupManifest{
 		// Common base fields
@@ -218,6 +225,7 @@ func (be *MySQLShellBackupEngine) ExecuteBackup(ctx context.Context, params Back
 			FinishedTime:   FormatRFC3339(time.Now().UTC()),
 			ServerUUID:     serverUUID,
 			TabletAlias:    params.TabletAlias,
+			Hostname:       hostname,
 			Keyspace:       params.Keyspace,
 			Shard:          params.Shard,
 			MySQLVersion:   mysqlVersion,
@@ -288,7 +296,7 @@ func (be *MySQLShellBackupEngine) ExecuteRestore(ctx context.Context, params Res
 
 	err = cleanupMySQL(ctx, params, shouldDeleteUsers)
 	if err != nil {
-		log.Errorf(err.Error())
+		log.Error(err.Error())
 		// time.Sleep(time.Minute * 2)
 		return nil, vterrors.Wrap(err, "error cleaning MySQL")
 	}
@@ -318,7 +326,7 @@ func (be *MySQLShellBackupEngine) ExecuteRestore(ctx context.Context, params Res
 			if err != nil {
 				params.Logger.Errorf("unable to re-enable REDO_LOG: %v", err)
 			} else {
-				params.Logger.Infof("Disabled REDO_LOG")
+				params.Logger.Infof("Enabled REDO_LOG")
 			}
 		}()
 	}
@@ -398,11 +406,11 @@ func (be *MySQLShellBackupEngine) Name() string { return mysqlShellBackupEngineN
 
 func (be *MySQLShellBackupEngine) backupPreCheck(location string) error {
 	if mysqlShellBackupLocation == "" {
-		return fmt.Errorf("%w: no backup location set via --mysql-shell-backup-location", MySQLShellPreCheckError)
+		return fmt.Errorf("%w: no backup location set via --mysql-shell-backup-location", ErrMySQLShellPreCheck)
 	}
 
 	if mysqlShellFlags == "" || !strings.Contains(mysqlShellFlags, "--js") {
-		return fmt.Errorf("%w: at least the --js flag is required in the value of the flag --mysql-shell-flags", MySQLShellPreCheckError)
+		return fmt.Errorf("%w: at least the --js flag is required in the value of the flag --mysql-shell-flags", ErrMySQLShellPreCheck)
 	}
 
 	// make sure the targe directory exists if the target location for the backup is not an object store
@@ -427,25 +435,25 @@ func (be *MySQLShellBackupEngine) backupPreCheck(location string) error {
 
 func (be *MySQLShellBackupEngine) restorePreCheck(ctx context.Context, params RestoreParams) (shouldDeleteUsers bool, err error) {
 	if mysqlShellFlags == "" {
-		return shouldDeleteUsers, fmt.Errorf("%w: at least the --js flag is required in the value of the flag --mysql-shell-flags", MySQLShellPreCheckError)
+		return shouldDeleteUsers, fmt.Errorf("%w: at least the --js flag is required in the value of the flag --mysql-shell-flags", ErrMySQLShellPreCheck)
 	}
 
-	loadFlags := map[string]interface{}{}
+	loadFlags := map[string]any{}
 	err = json.Unmarshal([]byte(mysqlShellLoadFlags), &loadFlags)
 	if err != nil {
-		return false, fmt.Errorf("%w: unable to parse JSON of load flags", MySQLShellPreCheckError)
+		return false, fmt.Errorf("%w: unable to parse JSON of load flags", ErrMySQLShellPreCheck)
 	}
 
 	if val, ok := loadFlags["updateGtidSet"]; !ok || val != "replace" {
-		return false, fmt.Errorf("%w: mysql-shell needs to restore with updateGtidSet set to \"replace\" to work with Vitess", MySQLShellPreCheckError)
+		return false, fmt.Errorf("%w: mysql-shell needs to restore with updateGtidSet set to \"replace\" to work with Vitess", ErrMySQLShellPreCheck)
 	}
 
 	if val, ok := loadFlags["progressFile"]; !ok || val != "" {
-		return false, fmt.Errorf("%w: \"progressFile\" needs to be empty as vitess always starts a restore from scratch", MySQLShellPreCheckError)
+		return false, fmt.Errorf("%w: \"progressFile\" needs to be empty as vitess always starts a restore from scratch", ErrMySQLShellPreCheck)
 	}
 
 	if val, ok := loadFlags["skipBinlog"]; !ok || val != true {
-		return false, fmt.Errorf("%w: \"skipBinlog\" needs to set to true", MySQLShellPreCheckError)
+		return false, fmt.Errorf("%w: \"skipBinlog\" needs to set to true", ErrMySQLShellPreCheck)
 	}
 
 	if val, ok := loadFlags["loadUsers"]; ok && val == true {
@@ -455,17 +463,24 @@ func (be *MySQLShellBackupEngine) restorePreCheck(ctx context.Context, params Re
 	if mysqlShellSpeedUpRestore {
 		version, err := params.Mysqld.GetVersionString(ctx)
 		if err != nil {
-			return false, fmt.Errorf("%w: failed to fetch MySQL version: %v", MySQLShellPreCheckError, err)
+			return false, fmt.Errorf("%w: failed to fetch MySQL version: %v", ErrMySQLShellPreCheck, err)
 		}
 
-		capableOf := mysql.ServerVersionCapableOf(version)
+		_, sv, err := ParseVersionString(version)
+		if err != nil {
+			return false, fmt.Errorf("%w: failed to parse MySQL version (version: %s): %v", ErrMySQLShellPreCheck, version, err)
+		}
+
+		versionStr := fmt.Sprintf("%d.%d.%d", sv.Major, sv.Minor, sv.Patch)
+
+		capableOf := mysql.ServerVersionCapableOf(versionStr)
 		capable, err := capableOf(capabilities.DisableRedoLogFlavorCapability)
 		if err != nil {
-			return false, fmt.Errorf("%w: error checking if server supports disabling redo log: %v", MySQLShellPreCheckError, err)
+			return false, fmt.Errorf("%w: error checking if server supports disabling redo log: %v", ErrMySQLShellPreCheck, err)
 		}
 
 		if !capable {
-			return false, fmt.Errorf("%w: MySQL version doesn't support disabling the redo log (must be >=8.0.21)", MySQLShellPreCheckError)
+			return false, fmt.Errorf("%w: MySQL version doesn't support disabling the redo log (must be >=8.0.21, current version: %s)", ErrMySQLShellPreCheck, versionStr)
 		}
 	}
 
@@ -507,7 +522,6 @@ func releaseReadLock(ctx context.Context, reader io.Reader, params BackupParams,
 		line := scanner.Text()
 
 		if !released {
-
 			if !strings.Contains(line, mysqlShellLockMessage) {
 				continue
 			}

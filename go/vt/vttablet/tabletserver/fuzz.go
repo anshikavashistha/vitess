@@ -1,5 +1,4 @@
 //go:build gofuzz
-// +build gofuzz
 
 /*
 Copyright 2021 The Vitess Authors.
@@ -69,6 +68,6 @@ func FuzzGetPlan(data []byte) int {
 	qe.SetQueryPlanCacheCap(1024)
 
 	// Call target
-	_, _ = qe.GetPlan(context.Background(), logStats, query2, true)
+	_, _ = qe.GetPlan(context.Background(), logStats, query2, true, false)
 	return 1
 }

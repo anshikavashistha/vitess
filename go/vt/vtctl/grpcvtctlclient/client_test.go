@@ -17,7 +17,6 @@ limitations under the License.
 package grpcvtctlclient
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net"
@@ -40,8 +39,7 @@ import (
 // the test here creates a fake server implementation, a fake client
 // implementation, and runs the test suite against the setup.
 func TestVtctlServer(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	ts := vtctlclienttest.CreateTopoServer(t, ctx)
 
 	// Listen on a random port
@@ -69,8 +67,7 @@ func TestVtctlServer(t *testing.T) {
 // the test here creates a fake server implementation, a fake client with auth
 // implementation, and runs the test suite against the setup.
 func TestVtctlAuthClient(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	ts := vtctlclienttest.CreateTopoServer(t, ctx)
 
 	// Listen on a random port
@@ -111,10 +108,10 @@ func TestVtctlAuthClient(t *testing.T) {
 	grpcclient.RegisterFlags(fs)
 
 	err = fs.Parse([]string{
-		"--grpc_auth_static_client_creds",
+		"--grpc-auth-static-client-creds",
 		f.Name(),
 	})
-	require.NoError(t, err, "failed to set `--grpc_auth_static_client_creds=%s`", f.Name())
+	require.NoError(t, err, "failed to set `--grpc-auth-static-client-creds=%s`", f.Name())
 
 	// Create a VtctlClient gRPC client to talk to the fake server
 	client, err := gRPCVtctlClientFactory(ctx, fmt.Sprintf("localhost:%v", port))

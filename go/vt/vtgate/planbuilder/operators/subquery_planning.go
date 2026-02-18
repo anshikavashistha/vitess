@@ -19,12 +19,14 @@ package operators
 import (
 	"fmt"
 	"io"
+	slices0 "slices"
 
 	"golang.org/x/exp/slices"
 
 	"vitess.io/vitess/go/slice"
 	"vitess.io/vitess/go/vt/sqlparser"
 	"vitess.io/vitess/go/vt/vterrors"
+	"vitess.io/vitess/go/vt/vtgate/engine"
 	"vitess.io/vitess/go/vt/vtgate/engine/opcode"
 	"vitess.io/vitess/go/vt/vtgate/planbuilder/plancontext"
 	"vitess.io/vitess/go/vt/vtgate/semantics"
@@ -42,16 +44,17 @@ func isMergeable(ctx *plancontext.PlanningContext, query sqlparser.TableStatemen
 
 	switch node := query.(type) {
 	case *sqlparser.Select:
+		// Window functions cannot be merged into the outer scope because they operate on a result set
+		// and require specific partitioning and ordering semantics that would be lost in a merge
+		if ctx.ContainsWindowFunc(node) {
+			return false
+		}
+
 		if node.GroupBy != nil && len(node.GroupBy.Exprs) > 0 {
 			// iff we are grouping, we need to check that we can perform the grouping inside a single shard, and we check that
 			// by checking that one of the grouping expressions used is a unique single column vindex.
 			// TODO: we could also support the case where all the columns of a multi-column vindex are used in the grouping
-			for _, gb := range node.GroupBy.Exprs {
-				if validVindex(gb) {
-					return true
-				}
-			}
-			return false
+			return slices0.ContainsFunc(node.GroupBy.Exprs, validVindex)
 		}
 
 		// if we have grouping, we have already checked that it's safe, and don't need to check for aggregations
@@ -515,7 +518,7 @@ func tryMergeSubqueriesRecursively(
 		return outer, NoRewrite
 	}
 
-	op = Clone(op).(*Route)
+	op = Clone(op)
 	op.Source = outer.Source
 	var finalResult *ApplyResult
 	for _, subq := range inner.Inner {
@@ -550,18 +553,16 @@ func tryMergeSubqueryWithOuter(ctx *plancontext.PlanningContext, subQuery *SubQu
 	if !subQuery.IsArgument {
 		op.Source = newFilter(outer.Source, subQuery.Original)
 	}
+	if outer.Comments != nil {
+		op.Comments = outer.Comments
+	}
 	ctx.MergedSubqueries = append(ctx.MergedSubqueries, subQuery.originalSubquery)
 	return op, Rewrote("merged subquery with outer")
 }
 
 // This checked if subquery is part of the changed vindex values. Subquery cannot be merged with the outer route.
 func mergingIsBlocked(subQuery *SubQuery, updOp *Update) bool {
-	for _, sqArg := range updOp.SubQueriesArgOnChangedVindex {
-		if sqArg == subQuery.ArgName {
-			return true
-		}
-	}
-	return false
+	return slices0.Contains(updOp.SubQueriesArgOnChangedVindex, subQuery.ArgName)
 }
 
 func pushOrMerge(ctx *plancontext.PlanningContext, outer Operator, inner *SubQuery) (Operator, *ApplyResult) {
@@ -585,7 +586,12 @@ type subqueryRouteMerger struct {
 	subq     *SubQuery
 }
 
-func (s *subqueryRouteMerger) mergeShardedRouting(ctx *plancontext.PlanningContext, r1, r2 *ShardedRouting, old1, old2 *Route) *Route {
+func (s *subqueryRouteMerger) mergeShardedRouting(
+	ctx *plancontext.PlanningContext,
+	r1, r2 *ShardedRouting,
+	old1, old2 *Route,
+	conditions ...engine.Condition,
+) *Route {
 	tr := &ShardedRouting{
 		VindexPreds: append(r1.VindexPreds, r2.VindexPreds...),
 		keyspace:    r1.keyspace,
@@ -634,10 +640,12 @@ func (s *subqueryRouteMerger) mergeShardedRouting(ctx *plancontext.PlanningConte
 	}
 
 	routing := tr.resetRoutingLogic(ctx)
-	return s.merge(ctx, old1, old2, routing)
+	return s.merge(ctx, old1, old2, routing, conditions...)
 }
 
-func (s *subqueryRouteMerger) merge(ctx *plancontext.PlanningContext, inner, outer *Route, r Routing) *Route {
+func (s *subqueryRouteMerger) merge(ctx *plancontext.PlanningContext, inner, outer *Route, r Routing, conditions ...engine.Condition) *Route {
+	allCond := append(outer.Conditions, inner.Conditions...)
+	allCond = append(allCond, conditions...)
 	if !s.subq.TopLevel {
 		// if the subquery we are merging isn't a top level predicate, we can't use it for routing
 		return &Route{
@@ -646,6 +654,7 @@ func (s *subqueryRouteMerger) merge(ctx *plancontext.PlanningContext, inner, out
 			Routing:       outer.Routing,
 			Ordering:      outer.Ordering,
 			ResultColumns: outer.ResultColumns,
+			Conditions:    allCond,
 		}
 	}
 	_, isSharded := r.(*ShardedRouting)
@@ -664,6 +673,7 @@ func (s *subqueryRouteMerger) merge(ctx *plancontext.PlanningContext, inner, out
 		Routing:       r,
 		Ordering:      s.outer.Ordering,
 		ResultColumns: s.outer.ResultColumns,
+		Conditions:    allCond,
 	}
 }
 

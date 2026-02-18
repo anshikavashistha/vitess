@@ -20,25 +20,32 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/exp/maps"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/encoding/prototext"
 
 	"vitess.io/vitess/go/cmd/vtctldclient/command/vreplication/movetables"
 	"vitess.io/vitess/go/constants/sidecar"
+	"vitess.io/vitess/go/mysql/sqlerror"
 	"vitess.io/vitess/go/protoutil"
+	"vitess.io/vitess/go/sqlescape"
 	"vitess.io/vitess/go/sqltypes"
 	"vitess.io/vitess/go/textutil"
 	"vitess.io/vitess/go/vt/discovery"
 	"vitess.io/vitess/go/vt/log"
 	"vitess.io/vitess/go/vt/logutil"
+	"vitess.io/vitess/go/vt/mysqlctl/tmutils"
 	"vitess.io/vitess/go/vt/proto/vttime"
 	"vitess.io/vitess/go/vt/sqlparser"
 	"vitess.io/vitess/go/vt/topo/topoproto"
 	"vitess.io/vitess/go/vt/vtctl/workflow"
 	"vitess.io/vitess/go/vt/vterrors"
+	"vitess.io/vitess/go/vt/vttablet/tabletmanager/vreplication"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/throttle/throttlerapp"
 
 	binlogdatapb "vitess.io/vitess/go/vt/proto/binlogdata"
@@ -53,7 +60,7 @@ const (
 	sqlHasVReplicationWorkflows   = "select if(count(*) > 0, 1, 0) as has_workflows from %s.vreplication where db_name = %a"
 	// Read all VReplication workflows. The final format specifier is used to
 	// optionally add any additional predicates to the query.
-	sqlReadVReplicationWorkflows = "select workflow, id, source, pos, stop_pos, max_tps, max_replication_lag, cell, tablet_types, time_updated, transaction_timestamp, state, message, db_name, rows_copied, tags, time_heartbeat, workflow_type, time_throttled, component_throttled, workflow_sub_type, defer_secondary_keys, options from %s.vreplication where db_name = %a%s group by workflow, id order by workflow, id"
+	sqlReadVReplicationWorkflows = "select workflow, id, source, pos, stop_pos, max_tps, max_replication_lag, cell, tablet_types, time_updated, transaction_timestamp, state, message, db_name, rows_copied, tags, time_heartbeat, workflow_type, time_throttled, component_throttled, workflow_sub_type, defer_secondary_keys, options from %s.vreplication where db_name = %a%s order by workflow, id"
 	// Read a VReplication workflow.
 	sqlReadVReplicationWorkflow = "select id, source, pos, stop_pos, max_tps, max_replication_lag, cell, tablet_types, time_updated, transaction_timestamp, state, message, db_name, rows_copied, tags, time_heartbeat, workflow_type, time_throttled, component_throttled, workflow_sub_type, defer_secondary_keys, options from %s.vreplication where workflow = %a and db_name = %a"
 	// Delete VReplication records for the given workflow.
@@ -69,7 +76,9 @@ const (
 	sqlGetVReplicationCopyStatus = "select distinct vrepl_id from %s.copy_state where vrepl_id = %d"
 	// Validate the minimum set of permissions needed to manage vreplication metadata.
 	// This is a simple check for a matching user rather than any specific user@host
-	// combination.
+	// combination. Also checks for wildcards. Note the, seemingly reverse check, `%a LIKE d.db`,
+	// which is required since %a replaces the actual sidecar db name and
+	// d.db is where a (potential) wildcard match is specified in a privilege grant.
 	sqlValidateVReplicationPermissions = `
 select count(*)>0 as good from mysql.user as u
   left join mysql.db as d on (u.user = d.user)
@@ -77,8 +86,8 @@ select count(*)>0 as good from mysql.user as u
 where u.user = %a
   and (
     (u.select_priv = 'y' and u.insert_priv = 'y' and u.update_priv = 'y' and u.delete_priv = 'y') /* user has global privs */
-    or (d.db = %a and d.select_priv = 'y' and d.insert_priv = 'y' and d.update_priv = 'y' and d.delete_priv = 'y') /* user has db privs */
-    or (t.db = %a and t.table_name = 'vreplication' /* user has table privs */
+    or (%a LIKE d.db escape '\\' and d.select_priv = 'y' and d.insert_priv = 'y' and d.update_priv = 'y' and d.delete_priv = 'y') /* user has db privs */
+    or (%a LIKE t.db escape '\\' and t.table_name = 'vreplication'
       and find_in_set('select', t.table_priv)
       and find_in_set('insert', t.table_priv)
       and find_in_set('update', t.table_priv)
@@ -86,7 +95,17 @@ where u.user = %a
     )
   )
 limit 1
+
 `
+	sqlGetMaxSequenceVal   = "select max(%a) as maxval from %a.%a"
+	sqlInitSequenceTable   = "insert into %a.%a (id, next_id, cache) values (0, %d, 1000) on duplicate key update next_id = if(next_id < %d, %d, next_id)"
+	sqlCreateSequenceTable = "create table if not exists %a (id int, next_id bigint, cache bigint, primary key(id)) comment 'vitess_sequence'"
+
+	// Functional permission testing queries - test each permission individually without accessing mysql.user table
+	sqlTestVReplicationSelectPermission = "select count(*) from %s.vreplication limit 1"
+	sqlTestVReplicationInsertPermission = "insert into %s.vreplication (workflow, source, pos, max_tps, max_replication_lag, cell, tablet_types, time_updated, transaction_timestamp, state, db_name, workflow_type, workflow_sub_type, defer_secondary_keys, options) values (%a, '', '', 0, 0, '', '', now(), 0, 'Stopped', '__test__', 0, 0, false, '{}')"
+	sqlTestVReplicationUpdatePermission = "update %s.vreplication set message = '__test_update__' where workflow = %a and db_name = '__test__'"
+	sqlTestVReplicationDeletePermission = "delete from %s.vreplication where workflow = %a and db_name = '__test__'"
 )
 
 var (
@@ -135,7 +154,6 @@ func (tm *TabletManager) CreateVReplicationWorkflow(ctx context.Context, req *ta
 			return nil, err
 		}
 		streamres, err := tm.VREngine.Exec(stmt)
-
 		if err != nil {
 			return nil, err
 		}
@@ -166,7 +184,7 @@ func (tm *TabletManager) DeleteTableData(ctx context.Context, req *tabletmanager
 	if batchSize < 1 {
 		batchSize = movetables.DefaultDeleteBatchSize
 	}
-	limit := &sqlparser.Limit{Rowcount: sqlparser.NewIntLiteral(fmt.Sprintf("%d", batchSize))}
+	limit := &sqlparser.Limit{Rowcount: sqlparser.NewIntLiteral(strconv.FormatInt(batchSize, 10))}
 	// We will log some progress info every 100 delete batches.
 	progressRows := uint64(batchSize * 100)
 
@@ -194,7 +212,7 @@ func (tm *TabletManager) DeleteTableData(ctx context.Context, req *tabletmanager
 		rowsDeleted := uint64(0)
 		// Delete all of the matching rows from the table, in batches, until we've
 		// deleted them all.
-		log.Infof("Starting deletion of data from table %s using query %q", table, query)
+		log.Info(fmt.Sprintf("Starting deletion of data from table %s using query %q", table, query))
 		for {
 			// Back off if we're causing too much load on the database with these
 			// batch deletes.
@@ -220,8 +238,7 @@ func (tm *TabletManager) DeleteTableData(ctx context.Context, req *tabletmanager
 			// how much work we've done, how much is left, and how long it may take
 			// (considering throttling, system performance, etc).
 			if rowsDeleted%progressRows == 0 {
-				log.Infof("Successfully deleted %d rows of data from table %s so far, using query %q",
-					rowsDeleted, table, query)
+				log.Info(fmt.Sprintf("Successfully deleted %d rows of data from table %s so far, using query %q", rowsDeleted, table, query))
 			}
 			if res.RowsAffected == 0 { // We're done with this table
 				break
@@ -230,8 +247,7 @@ func (tm *TabletManager) DeleteTableData(ctx context.Context, req *tabletmanager
 				return nil, err
 			}
 		}
-		log.Infof("Completed deletion of data (%d rows) from table %s using query %q",
-			rowsDeleted, table, query)
+		log.Info(fmt.Sprintf("Completed deletion of data (%d rows) from table %s using query %q", rowsDeleted, table, query))
 	}
 
 	return &tabletmanagerdatapb.DeleteTableDataResponse{}, nil
@@ -252,7 +268,6 @@ func (tm *TabletManager) DeleteVReplicationWorkflow(ctx context.Context, req *ta
 		return nil, err
 	}
 	streamres, err := tm.VREngine.Exec(stmt)
-
 	if err != nil {
 		return nil, err
 	}
@@ -585,6 +600,7 @@ func (tm *TabletManager) UpdateVReplicationWorkflow(ctx context.Context, req *ta
 		if req.OnDdl != nil && *req.OnDdl != binlogdatapb.OnDDLAction(textutil.SimulatedNullInt) {
 			bls.OnDdl = *req.OnDdl
 		}
+		bls.Filter.Rules = append(bls.Filter.Rules, req.FilterRules...)
 		source, err = prototext.Marshal(bls)
 		if err != nil {
 			return nil, err
@@ -660,22 +676,26 @@ func getOptionSetString(config map[string]string) string {
 	if len(deletedKeys) > 0 {
 		// We need to quote the key in the json functions because flag names can contain hyphens.
 		clause = fmt.Sprintf("json_remove(options, '$.config.\"%s\"'", deletedKeys[0])
+		var clauseSb681 strings.Builder
 		for _, k := range deletedKeys[1:] {
-			clause += fmt.Sprintf(", '$.config.\"%s\"'", k)
+			clauseSb681.WriteString(fmt.Sprintf(", '$.config.\"%s\"'", k))
 		}
+		clause += clauseSb681.String()
 		clause += ")"
 	}
 	if len(keys) > 0 {
 		clause = fmt.Sprintf("json_set(%s, '$.config', json_object(), ", clause)
+		var clauseSb688 strings.Builder
 		for i, k := range keys {
 			if i > 0 {
-				clause += ", "
+				clauseSb688.WriteString(", ")
 			}
-			clause += fmt.Sprintf("'$.config.\"%s\"', '%s'", k, strings.TrimSpace(config[k]))
+			clauseSb688.WriteString(fmt.Sprintf("'$.config.\"%s\"', '%s'", k, strings.TrimSpace(config[k])))
 		}
+		clause += clauseSb688.String()
 		clause += ")"
 	}
-	options = fmt.Sprintf(", options = %s", clause)
+	options = ", options = " + clause
 	return options
 }
 
@@ -702,10 +722,165 @@ func (tm *TabletManager) UpdateVReplicationWorkflows(ctx context.Context, req *t
 	}, nil
 }
 
-// ValidateVReplicationPermissions validates that the --db_filtered_user has
+func (tm *TabletManager) GetMaxValueForSequences(ctx context.Context, req *tabletmanagerdatapb.GetMaxValueForSequencesRequest) (*tabletmanagerdatapb.GetMaxValueForSequencesResponse, error) {
+	maxValues := make(map[string]int64, len(req.Sequences))
+	mu := sync.Mutex{}
+	initGroup, gctx := errgroup.WithContext(ctx)
+	for _, sm := range req.Sequences {
+		initGroup.Go(func() error {
+			maxId, err := tm.getMaxSequenceValue(gctx, sm)
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			maxValues[sm.BackingTableName] = maxId
+			return nil
+		})
+	}
+	errs := initGroup.Wait()
+	if errs != nil {
+		return nil, errs
+	}
+	return &tabletmanagerdatapb.GetMaxValueForSequencesResponse{
+		MaxValuesBySequenceTable: maxValues,
+	}, nil
+}
+
+func (tm *TabletManager) getMaxSequenceValue(ctx context.Context, sm *tabletmanagerdatapb.GetMaxValueForSequencesRequest_SequenceMetadata) (int64, error) {
+	for _, val := range []string{sm.UsingTableDbNameEscaped, sm.UsingTableNameEscaped, sm.UsingColEscaped} {
+		lv := len(val)
+		if lv < 3 || val[0] != '`' || val[lv-1] != '`' {
+			return 0, vterrors.Errorf(vtrpcpb.Code_INVALID_ARGUMENT,
+				"the database (%s), table (%s), and column (%s) names must be non-empty escaped values", sm.UsingTableDbNameEscaped, sm.UsingTableNameEscaped, sm.UsingColEscaped)
+		}
+	}
+	query := sqlparser.BuildParsedQuery(sqlGetMaxSequenceVal,
+		sm.UsingColEscaped,
+		sm.UsingTableDbNameEscaped,
+		sm.UsingTableNameEscaped,
+	)
+	qr, err := tm.ExecuteFetchAsApp(ctx, &tabletmanagerdatapb.ExecuteFetchAsAppRequest{
+		Query:   []byte(query.Query),
+		MaxRows: 1,
+	})
+	if err != nil || len(qr.Rows) != 1 {
+		return 0, vterrors.Errorf(vtrpcpb.Code_INTERNAL,
+			"failed to get the max used sequence value for target table %s in order to initialize the backing sequence table: %v", sm.UsingTableNameEscaped, err)
+	}
+	rawVal := sqltypes.Proto3ToResult(qr).Rows[0][0]
+	maxID := int64(0)
+	if !rawVal.IsNull() { // If it's NULL then there are no rows and 0 remains the max
+		maxID, err = rawVal.ToInt64()
+		if err != nil {
+			return 0, vterrors.Errorf(vtrpcpb.Code_INTERNAL, "failed to get the max used sequence value for target table %s in order to initialize the backing sequence table: %v", sm.UsingTableNameEscaped, err)
+		}
+	}
+	return maxID, nil
+}
+
+func (tm *TabletManager) UpdateSequenceTables(ctx context.Context, req *tabletmanagerdatapb.UpdateSequenceTablesRequest) (*tabletmanagerdatapb.UpdateSequenceTablesResponse, error) {
+	sequenceTables := make([]string, 0, len(req.Sequences))
+	for _, sm := range req.Sequences {
+		if err := tm.updateSequenceValue(ctx, sm); err != nil {
+			return nil, err
+		}
+		sequenceTables = append(sequenceTables, sm.BackingTableName)
+	}
+
+	// It is important to reset in-memory sequence counters on the tables,
+	// since it is possible for it to be outdated, this will prevent duplicate
+	// key errors.
+	err := tm.ResetSequences(ctx, sequenceTables)
+	if err != nil {
+		return nil, vterrors.Errorf(
+			vtrpcpb.Code_INTERNAL, "failed to reset sequences on %q: %v",
+			tm.DBConfigs.DBName, err)
+	}
+	return &tabletmanagerdatapb.UpdateSequenceTablesResponse{}, nil
+}
+
+func (tm *TabletManager) updateSequenceValue(ctx context.Context, seq *tabletmanagerdatapb.UpdateSequenceTablesRequest_SequenceMetadata) error {
+	nextVal := seq.MaxValue + 1
+	if tm.Tablet().DbNameOverride != "" {
+		seq.BackingTableDbName = tm.Tablet().DbNameOverride
+	}
+	backingTableDbNameEscaped, err := sqlescape.EnsureEscaped(seq.BackingTableDbName)
+	if err != nil {
+		return vterrors.Errorf(vtrpcpb.Code_INVALID_ARGUMENT, "invalid database name %s specified for sequence backing table: %v",
+			seq.BackingTableDbName, err)
+	}
+	backingTableNameEscaped, err := sqlescape.EnsureEscaped(seq.BackingTableName)
+	if err != nil {
+		return vterrors.Errorf(vtrpcpb.Code_INVALID_ARGUMENT, "invalid table name %s specified for sequence backing table: %v",
+			seq.BackingTableName, err)
+	}
+	log.Info(fmt.Sprintf("Updating sequence %s.%s to %d", seq.BackingTableDbName, seq.BackingTableName, nextVal))
+	initQuery := sqlparser.BuildParsedQuery(sqlInitSequenceTable,
+		backingTableDbNameEscaped,
+		backingTableNameEscaped,
+		nextVal,
+		nextVal,
+		nextVal,
+	)
+	const maxTries = 2
+
+	for range maxTries {
+		// Attempt to initialize the sequence.
+		_, err = tm.ExecuteFetchAsApp(ctx, &tabletmanagerdatapb.ExecuteFetchAsAppRequest{
+			Query:   []byte(initQuery.Query),
+			MaxRows: 1,
+		})
+		if err == nil {
+			return nil
+		}
+
+		// If the table doesn't exist, try creating it.
+		sqlErr, ok := sqlerror.NewSQLErrorFromError(err).(*sqlerror.SQLError)
+		if !ok || (sqlErr.Num != sqlerror.ERNoSuchTable && sqlErr.Num != sqlerror.ERBadTable) {
+			return vterrors.Errorf(
+				vtrpcpb.Code_INTERNAL,
+				"failed to initialize the backing sequence table %s.%s: %v",
+				backingTableDbNameEscaped, backingTableNameEscaped, err,
+			)
+		}
+
+		if err := tm.createSequenceTable(ctx, backingTableNameEscaped); err != nil {
+			return vterrors.Errorf(vtrpcpb.Code_INTERNAL,
+				"failed to create the backing sequence table %s in the global-keyspace %s: %v",
+				backingTableNameEscaped, tm.Tablet().Keyspace, err)
+		}
+		// Table has been created, so we fall through and try again on the next loop iteration.
+	}
+
+	return vterrors.Errorf(
+		vtrpcpb.Code_INTERNAL, "failed to initialize the backing sequence table %s.%s after retries. Last error: %v",
+		backingTableDbNameEscaped, backingTableNameEscaped, err)
+}
+
+func (tm *TabletManager) createSequenceTable(ctx context.Context, tableName string) error {
+	escapedTableName, err := sqlescape.EnsureEscaped(tableName)
+	if err != nil {
+		return err
+	}
+	stmt := sqlparser.BuildParsedQuery(sqlCreateSequenceTable, escapedTableName)
+	_, err = tm.ApplySchema(ctx, &tmutils.SchemaChange{
+		SQL:                     stmt.Query,
+		Force:                   false,
+		AllowReplication:        true,
+		SQLMode:                 vreplication.SQLMode,
+		DisableForeignKeyChecks: true,
+	})
+	return err
+}
+
+// ValidateVReplicationPermissionsOld validates that the --db_filtered_user has
 // the minimum permissions required on the sidecardb vreplication table
 // needed in order to manage vreplication metadata.
-func (tm *TabletManager) ValidateVReplicationPermissions(ctx context.Context, req *tabletmanagerdatapb.ValidateVReplicationPermissionsRequest) (*tabletmanagerdatapb.ValidateVReplicationPermissionsResponse, error) {
+// Switching to use a functional test approach in ValidateVReplicationPermissions below
+// instead of querying mysql.user table directly as that requires permissions on the mysql.user table.
+// Leaving this here for now in case we want to revert back.
+func (tm *TabletManager) ValidateVReplicationPermissionsOld(ctx context.Context, req *tabletmanagerdatapb.ValidateVReplicationPermissionsRequest) (*tabletmanagerdatapb.ValidateVReplicationPermissionsResponse, error) {
 	query, err := sqlparser.ParseAndBind(sqlValidateVReplicationPermissions,
 		sqltypes.StringBindVariable(tm.DBConfigs.Filtered.User),
 		sqltypes.StringBindVariable(sidecar.GetName()),
@@ -714,6 +889,7 @@ func (tm *TabletManager) ValidateVReplicationPermissions(ctx context.Context, re
 	if err != nil {
 		return nil, err
 	}
+	log.Info(fmt.Sprintf("Validating VReplication permissions on %s using query %s", tm.tabletAlias, query))
 	conn, err := tm.MysqlDaemon.GetAllPrivsConnection(ctx)
 	if err != nil {
 		return nil, err
@@ -732,9 +908,96 @@ func (tm *TabletManager) ValidateVReplicationPermissions(ctx context.Context, re
 		return nil, vterrors.Errorf(vtrpcpb.Code_INTERNAL, "unexpected result for query %s: expected boolean-like value, got: %q",
 			query, qr.Rows[0][0].ToString())
 	}
+	var errorString string
+	if !val {
+		errorString = fmt.Sprintf("user %s does not have the required set of permissions (select,insert,update,delete) on the %s.vreplication table on tablet %s",
+			tm.DBConfigs.Filtered.User, sidecar.GetName(), topoproto.TabletAliasString(tm.tabletAlias))
+		log.Error(fmt.Sprintf("validateVReplicationPermissions returning error: %s. Permission query run was %s", errorString, query))
+	}
 	return &tabletmanagerdatapb.ValidateVReplicationPermissionsResponse{
-		User: tm.DBConfigs.Filtered.User,
-		Ok:   val,
+		User:  tm.DBConfigs.Filtered.User,
+		Ok:    val,
+		Error: errorString,
+	}, nil
+}
+
+// ValidateVReplicationPermissions validates that the --db_filtered_user has
+// the minimum permissions required on the sidecardb vreplication table
+// using a functional testing approach that doesn't require access to mysql.user table.
+func (tm *TabletManager) ValidateVReplicationPermissions(ctx context.Context, req *tabletmanagerdatapb.ValidateVReplicationPermissionsRequest) (*tabletmanagerdatapb.ValidateVReplicationPermissionsResponse, error) {
+	log.Info(fmt.Sprintf("Validating VReplication permissions on sidecar db %s", tm.tabletAlias))
+
+	conn, err := tm.MysqlDaemon.GetFilteredConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecuteFetch("START TRANSACTION", 1, false); err != nil {
+		return nil, vterrors.Wrap(err, "failed to start transaction for permission testing")
+	}
+	defer func() {
+		_, err := conn.ExecuteFetch("ROLLBACK", 1, false)
+		if err != nil {
+			log.Warn(fmt.Sprintf("failed to rollback transaction after permission testing: %v", err))
+		}
+	}()
+
+	// Create a unique test workflow name to avoid conflicts using timestamp and random component
+	testWorkflow := fmt.Sprintf("__permission_test_%d_%d", time.Now().Unix(), time.Now().Nanosecond()%1000000)
+	sidecarDB := sidecar.GetName()
+
+	permissionTests := []struct {
+		permission  string
+		sqlTemplate string
+	}{
+		{"SELECT", sqlTestVReplicationSelectPermission},
+		{"INSERT", sqlTestVReplicationInsertPermission},
+		{"UPDATE", sqlTestVReplicationUpdatePermission},
+		{"DELETE", sqlTestVReplicationDeletePermission},
+	}
+
+	for _, test := range permissionTests {
+		var query string
+		var err error
+
+		if test.permission == "SELECT" {
+			parsed := sqlparser.BuildParsedQuery(test.sqlTemplate, sidecar.GetIdentifier())
+			query, err = parsed.GenerateQuery(nil, nil)
+		} else {
+			parsed := sqlparser.BuildParsedQuery(test.sqlTemplate, sidecar.GetIdentifier(), ":workflow")
+			query, err = parsed.GenerateQuery(map[string]*querypb.BindVariable{
+				"workflow": sqltypes.StringBindVariable(testWorkflow),
+			}, nil)
+		}
+
+		if err != nil {
+			return nil, vterrors.Wrapf(err, "failed to bind %s query for permission testing", test.permission)
+		}
+
+		log.Info(fmt.Sprintf("Testing %s permission using query: %s", test.permission, query))
+		if _, err := conn.ExecuteFetch(query, 1, false); err != nil {
+			// Check if we got `ERTableAccessDenied` error code from MySQL
+			sqlErr, ok := sqlerror.NewSQLErrorFromError(err).(*sqlerror.SQLError)
+			if !ok || sqlErr.Num != sqlerror.ERTableAccessDenied {
+				return nil, vterrors.Wrapf(err, "error executing %s permission test query", test.permission)
+			}
+
+			return &tabletmanagerdatapb.ValidateVReplicationPermissionsResponse{
+				User: tm.DBConfigs.Filtered.User,
+				Ok:   false,
+				Error: fmt.Sprintf("user %s does not have %s permission on %s.vreplication table on tablet %s: %v",
+					tm.DBConfigs.Filtered.User, test.permission, sidecarDB, topoproto.TabletAliasString(tm.tabletAlias), err),
+			}, nil
+		}
+	}
+
+	log.Info(fmt.Sprintf("VReplication sidecardb permission validation succeeded for user %s on tablet %s", tm.DBConfigs.Filtered.User, tm.tabletAlias))
+
+	return &tabletmanagerdatapb.ValidateVReplicationPermissionsResponse{
+		User:  tm.DBConfigs.Filtered.User,
+		Ok:    true,
+		Error: "",
 	}, nil
 }
 
@@ -774,7 +1037,7 @@ func (tm *TabletManager) buildReadVReplicationWorkflowsQuery(req *tabletmanagerd
 			if i > 0 {
 				additionalPredicates.WriteByte(',')
 			}
-			additionalPredicates.WriteString(fmt.Sprintf("%d", id))
+			additionalPredicates.WriteString(strconv.Itoa(int(id)))
 		}
 		additionalPredicates.WriteByte(')')
 	}

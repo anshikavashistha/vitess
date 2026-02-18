@@ -34,8 +34,10 @@ import (
 )
 
 // ErrTabletAliasNil is a fixed error message.
-var ErrTabletAliasNil = errors.New("tablet alias is nil")
-var tmc tmclient.TabletManagerClient
+var (
+	ErrTabletAliasNil = errors.New("tablet alias is nil")
+	tmc               tmclient.TabletManagerClient
+)
 
 // InitializeTMC initializes the tablet manager client to use for all VTOrc RPC calls.
 func InitializeTMC() tmclient.TabletManagerClient {
@@ -72,6 +74,25 @@ func ReadTablet(tabletAlias string) (*topodatapb.Tablet, error) {
 		return nil, ErrTabletAliasNil
 	}
 	return tablet, nil
+}
+
+// ReadTabletCountsByCell returns the count of tablets watched by cell.
+// The backend query uses an index by "cell": cell_idx_vitess_tablet.
+func ReadTabletCountsByCell() (map[string]int64, error) {
+	tabletCounts := make(map[string]int64)
+	query := `SELECT
+		cell,
+		COUNT() AS count
+	FROM
+		vitess_tablet
+	GROUP BY
+		cell`
+	err := db.QueryVTOrc(query, nil, func(row sqlutils.RowMap) error {
+		cell := row.GetString("cell")
+		tabletCounts[cell] = row.GetInt64("count")
+		return nil
+	})
+	return tabletCounts, err
 }
 
 // SaveTablet saves the tablet record against the instanceKey.

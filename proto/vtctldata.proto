@@ -55,6 +55,9 @@ enum MaterializationIntent {
 
   // CREATELOOKUPINDEX is when we are creating a CreateLookupIndex flow
   CREATELOOKUPINDEX = 2;
+
+  // REFERENCE is when we are creating a materialization for reference tables
+  REFERENCE = 3;
 }
 
 // TableMaterializeSttings contains the settings for one table.
@@ -172,6 +175,7 @@ message SchemaMigration {
   vttime.Time reviewed_at = 52;
   vttime.Time ready_to_complete_at = 53;
   string removed_foreign_key_names = 54;
+  uint64 in_order_completion_pending_count = 55;
 
   enum Strategy {
     option allow_alias = true;
@@ -228,6 +232,8 @@ message WorkflowOptions {
   // Where to create any related schema and vschema objects such as
   // sequence tables.
   string global_keyspace = 5;
+  // Lookup Vindexes that are being backfilled by the workflow.
+  repeated string lookup_vindexes = 6;
 }
 
 // TODO: comment the hell out of this.
@@ -461,6 +467,15 @@ message BackupRequest {
   bool upgrade_safe = 5;
   // BackupEngine specifies if we want to use a particular backup engine for this backup request
   optional string backup_engine = 6;
+
+  // MysqlShutdownTimeout is the duration to wait for mysqld to shutdown before
+  // starting the backup. This is available so we can override this for upgrade safe
+  // backups which might take longer to shut down.
+  vttime.Duration mysql_shutdown_timeout = 7;
+
+  // Optional queries to run on the mysqld instance prior to the backup and fields
+  // to control the related behavior.
+  tabletmanagerdata.BackupRequest.InitSQL init_sql = 8;
 }
 
 message BackupResponse {
@@ -486,11 +501,22 @@ message BackupShardRequest {
   // IncrementalFromPos indicates a position of a previous backup. When this value is non-empty
   // then the backup becomes incremental and applies as of given position.
   string incremental_from_pos = 6;
+  // MysqlShutdownTimeout is the duration to wait for mysqld to shutdown before
+  // starting the backup. This is available so we can override this for upgrade safe
+  // backups which might take longer to shut down.
+  vttime.Duration mysql_shutdown_timeout = 7;
+
+  // Optional queries to run on the mysqld instance prior to the backup and fields
+  // to control the related behavior.
+  tabletmanagerdata.BackupRequest.InitSQL init_sql = 8;
 }
 
 message CancelSchemaMigrationRequest {
   string keyspace = 1;
   string uuid = 2;
+  // caller_id identifies the caller. This is the effective caller ID,
+  // set by the application to further identify the caller. This is needed when strict table ACLs are enforced on the tablets.
+  vtrpc.CallerID caller_id = 3;
 }
 
 message CancelSchemaMigrationResponse {
@@ -541,6 +567,9 @@ message CheckThrottlerResponse {
 message CleanupSchemaMigrationRequest {
   string keyspace = 1;
   string uuid = 2;
+  // caller_id identifies the caller. This is the effective caller ID,
+  // set by the application to further identify the caller.
+  vtrpc.CallerID caller_id = 3;
 }
 
 message CleanupSchemaMigrationResponse {
@@ -550,6 +579,9 @@ message CleanupSchemaMigrationResponse {
 message CompleteSchemaMigrationRequest {
   string keyspace = 1;
   string uuid = 2;
+  // caller_id identifies the caller. This is the effective caller ID,
+  // set by the application to further identify the caller.
+  vtrpc.CallerID caller_id = 3;
 }
 
 message CompleteSchemaMigrationResponse {
@@ -822,6 +854,9 @@ message FindAllShardsInKeyspaceResponse {
 message ForceCutOverSchemaMigrationRequest {
   string keyspace = 1;
   string uuid = 2;
+  // caller_id identifies the caller. This is the effective caller ID,
+  // set by the application to further identify the caller.
+  vtrpc.CallerID caller_id = 3;
 }
 
 message ForceCutOverSchemaMigrationResponse {
@@ -1225,6 +1260,9 @@ message InitShardPrimaryResponse {
 message LaunchSchemaMigrationRequest {
   string keyspace = 1;
   string uuid = 2;
+  // caller_id identifies the caller. This is the effective caller ID,
+  // set by the application to further identify the caller.
+  vtrpc.CallerID caller_id = 3;
 }
 
 message LaunchSchemaMigrationResponse {
@@ -1292,6 +1330,16 @@ message MaterializeCreateRequest {
 }
 
 message MaterializeCreateResponse {
+}
+
+message WorkflowAddTablesRequest {
+  string workflow = 1;
+  string keyspace = 2;
+  repeated TableMaterializeSettings table_settings = 3;
+  MaterializationIntent materialization_intent = 4;
+}
+
+message WorkflowAddTablesResponse {
 }
 
 message MigrateCreateRequest {
@@ -1424,6 +1472,9 @@ message MoveTablesCompleteRequest {
   bool rename_tables = 6;
   bool dry_run = 7;
   repeated string shards = 8;
+  // Set to true if the you know that the source keyspace is no
+  // longer available but still want to complete the workflow.
+  bool ignore_source_keyspace = 9;
 }
 
 message MoveTablesCompleteResponse {
@@ -1669,6 +1720,9 @@ message RestoreFromBackupResponse {
 message RetrySchemaMigrationRequest {
   string keyspace = 1;
   string uuid = 2;
+  // caller_id identifies the caller. This is the effective caller ID,
+  // set by the application to further identify the caller.
+  vtrpc.CallerID caller_id = 3;
 }
 
 message RetrySchemaMigrationResponse {
@@ -2110,6 +2164,10 @@ message WorkflowDeleteRequest {
   // up the migrated data. This is only used with multi-tenant
   // MoveTables migrations.
   int64 delete_batch_size = 6;
+  // Set to true if the you know that the source keyspace is no
+  // longer available but still want to clean everything up on the
+  // target keyspace.
+  bool ignore_source_keyspace = 7;
 }
 
 message WorkflowDeleteResponse {
@@ -2128,6 +2186,13 @@ message WorkflowStatusRequest {
   repeated string shards = 3;
 }
 
+enum TableCopyPhase {
+  UNKNOWN = 0;
+  NOT_STARTED = 1;
+  IN_PROGRESS = 2;
+  COMPLETE = 3;
+}
+
 message WorkflowStatusResponse {
   message TableCopyState {
     int64 rows_copied = 1;
@@ -2136,6 +2201,7 @@ message WorkflowStatusResponse {
     int64 bytes_copied = 4;
     int64 bytes_total = 5;
     float bytes_percentage = 6;
+    TableCopyPhase phase = 7;
   }
   message ShardStreamState {
     int32 id = 1;
@@ -2212,4 +2278,13 @@ message WorkflowMirrorTrafficResponse {
   string summary = 1;
   string start_state = 2;
   string current_state = 3;
+}
+
+message SetVtorcEmergencyReparentRequest {
+  string keyspace = 1;
+  string shard = 2;
+  bool disable = 3;
+}
+
+message SetVtorcEmergencyReparentResponse {
 }

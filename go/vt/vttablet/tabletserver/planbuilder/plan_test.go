@@ -41,7 +41,7 @@ import (
 func (p *Plan) MarshalJSON() ([]byte, error) {
 	mplan := struct {
 		PlanID            PlanType
-		TableName         sqlparser.IdentifierCS `json:",omitempty"`
+		TableName         sqlparser.IdentifierCS
 		Permissions       []Permission           `json:",omitempty"`
 		FieldQuery        *sqlparser.ParsedQuery `json:",omitempty"`
 		FullQuery         *sqlparser.ParsedQuery `json:",omitempty"`
@@ -161,7 +161,7 @@ func TestCustom(t *testing.T) {
 	for _, schemFile := range testSchemas {
 		schem := loadSchema(schemFile)
 		t.Logf("Testing schema %s", schemFile)
-		files, err := filepath.Glob(strings.Replace(schemFile, "schema.json", "*.txt", -1))
+		files, err := filepath.Glob(strings.ReplaceAll(schemFile, "schema.json", "*.txt"))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -320,7 +320,7 @@ func iterateExecFile(name string) (testCaseIterator chan testCase) {
 	name = locateFile(name)
 	fd, err := os.OpenFile(name, os.O_RDONLY, 0)
 	if err != nil {
-		panic(fmt.Sprintf("Could not open file %s", name))
+		panic("Could not open file " + name)
 	}
 	testCaseIterator = make(chan testCase)
 	go func() {

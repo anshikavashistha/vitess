@@ -18,7 +18,6 @@ R442
 package mysqlserver
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -41,7 +40,7 @@ import (
 
 // TestMultiStmt checks that multiStatements=True and multiStatements=False work properly.
 func TestMultiStatement(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// connect database with multiStatements=True
 	db := connectDB(t, vtParams, "multiStatements=True", "timeout=90s", "collation=utf8mb4_unicode_ci")
@@ -63,12 +62,12 @@ func TestMultiStatement(t *testing.T) {
 
 	_, err = db.QueryContext(ctx, "SELECT 1; SELECT 2; SELECT 3")
 	require.NotNilf(t, err, "error expected, got nil error")
-	assert.Containsf(t, err.Error(), "syntax error", "expected syntax error, got %v", err)
+	assert.Containsf(t, err.Error(), "Error 1149 (42000): Expected a single statement", "expected error, got %v", err)
 }
 
 // TestLargeComment add large comment in insert stmt and validate the insert process.
 func TestLargeComment(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.Nilf(t, err, "unable to connect mysql: %v", err)
@@ -86,14 +85,13 @@ func TestLargeComment(t *testing.T) {
 
 // TestInsertLargerThenGrpcLimit insert blob larger then grpc limit and verify the error.
 func TestInsertLargerThenGrpcLimit(t *testing.T) {
-
-	ctx := context.Background()
+	ctx := t.Context()
 
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.Nilf(t, err, "unable to connect mysql: %v", err)
 	defer conn.Close()
 
-	grpcLimit := os.Getenv("grpc_max_message_size")
+	grpcLimit := os.Getenv("grpc-max-message-size")
 	limit, err := strconv.Atoi(grpcLimit)
 	require.Nilf(t, err, "int parsing error: %v", err)
 
@@ -105,7 +103,7 @@ func TestInsertLargerThenGrpcLimit(t *testing.T) {
 
 // TestTimeout executes sleep(5) with query_timeout of 1 second, and verifies the error.
 func TestTimeout(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.Nilf(t, err, "unable to connect mysql: %v", err)
@@ -120,7 +118,7 @@ func TestTimeout(t *testing.T) {
 
 // TestInvalidField tries to fetch invalid column and verifies the error.
 func TestInvalidField(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.Nilf(t, err, "unable to connect mysql: %v", err)
@@ -135,7 +133,7 @@ func TestInvalidField(t *testing.T) {
 
 // TestWarnings validates the behaviour of SHOW WARNINGS.
 func TestWarnings(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.NoError(t, err)
@@ -176,7 +174,7 @@ func TestWarnings(t *testing.T) {
 // TestSelectWithUnauthorizedUser verifies that an unauthorized user
 // is not able to read from the table.
 func TestSelectWithUnauthorizedUser(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	tmpVtParam := vtParams
 	tmpVtParam.Uname = "testuser2"
@@ -194,7 +192,6 @@ func TestSelectWithUnauthorizedUser(t *testing.T) {
 
 // TestPartitionedTable validates that partitioned tables are recognized by schema engine
 func TestPartitionedTable(t *testing.T) {
-
 	tablet := clusterInstance.Keyspaces[0].Shards[0].PrimaryTablet()
 
 	// Partitioned table already created, check if vttablet knows about it

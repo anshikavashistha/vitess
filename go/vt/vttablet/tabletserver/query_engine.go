@@ -123,11 +123,15 @@ func isValid(planType planbuilder.PlanType, hasReservedCon bool, hasSysSettings 
 
 // _______________________________________________
 
-type PlanCacheKey = theine.StringKey
-type PlanCache = theine.Store[PlanCacheKey, *TabletPlan]
+type (
+	PlanCacheKey = theine.StringKey
+	PlanCache    = theine.Store[PlanCacheKey, *TabletPlan]
+)
 
-type SettingsCacheKey = theine.StringKey
-type SettingsCache = theine.Store[SettingsCacheKey, *smartconnpool.Setting]
+type (
+	SettingsCacheKey = theine.StringKey
+	SettingsCache    = theine.Store[SettingsCacheKey, *smartconnpool.Setting]
+)
 
 type currentSchema struct {
 	tables map[string]*schema.Table
@@ -189,7 +193,6 @@ type QueryEngine struct {
 	// Note: queryErrorCountsWithCode is similar to queryErrorCounts except it contains error code as an additional dimension
 	queryCounts, queryCountsWithTabletType, queryTimes, queryErrorCounts, queryErrorCountsWithCode, queryRowsAffected, queryRowsReturned, queryTextCharsProcessed *stats.CountersWithMultiLabels
 	queryEnginePlanCacheHits, queryEnginePlanCacheMisses                                                                                                          *stats.CounterFunc
-	queryCacheHitsDeprecated, queryCacheMissesDeprecated                                                                                                          *stats.CounterFunc
 
 	// stats flags
 	enablePerWorkloadTableMetrics bool
@@ -221,7 +224,7 @@ func NewQueryEngine(env tabletenv.Env, se *schema.Engine) *QueryEngine {
 	// cache for connection settings: default to 1/4th of the size for the query cache and do
 	// not use a doorkeeper because custom connection settings are rarely one-off and we always
 	// want to cache them
-	var settingsCacheMemory = config.QueryCacheMemory / 4
+	settingsCacheMemory := config.QueryCacheMemory / 4
 	qe.settings = theine.NewStore[SettingsCacheKey, *smartconnpool.Setting](settingsCacheMemory, false)
 
 	qe.schema.Store(&currentSchema{
@@ -234,8 +237,7 @@ func NewQueryEngine(env tabletenv.Env, se *schema.Engine) *QueryEngine {
 	qe.consolidatorMode.Store(config.Consolidator)
 	qe.consolidator = sync2.NewConsolidator()
 	if config.ConsolidatorStreamTotalSize > 0 && config.ConsolidatorStreamQuerySize > 0 {
-		log.Infof("Stream consolidator is enabled with query size set to %d and total size set to %d.",
-			config.ConsolidatorStreamQuerySize, config.ConsolidatorStreamTotalSize)
+		log.Info(fmt.Sprintf("Stream consolidator is enabled with query size set to %d and total size set to %d.", config.ConsolidatorStreamQuerySize, config.ConsolidatorStreamTotalSize))
 		qe.streamConsolidator = NewStreamConsolidator(config.ConsolidatorStreamTotalSize, config.ConsolidatorStreamQuerySize, returnStreamResult)
 	} else {
 		log.Info("Stream consolidator is not enabled.")
@@ -250,13 +252,13 @@ func NewQueryEngine(env tabletenv.Env, se *schema.Engine) *QueryEngine {
 	if config.TableACLExemptACL != "" {
 		if f, err := tableacl.GetCurrentACLFactory(); err == nil {
 			if exemptACL, err := f.New([]string{config.TableACLExemptACL}); err == nil {
-				log.Infof("Setting Table ACL exempt rule for %v", config.TableACLExemptACL)
+				log.Info(fmt.Sprintf("Setting Table ACL exempt rule for %v", config.TableACLExemptACL))
 				qe.exemptACL = exemptACL
 			} else {
-				log.Infof("Cannot build exempt ACL for table ACL: %v", err)
+				log.Info(fmt.Sprintf("Cannot build exempt ACL for table ACL: %v", err))
 			}
 		} else {
-			log.Infof("Cannot get current ACL Factory: %v", err)
+			log.Info(fmt.Sprintf("Cannot get current ACL Factory: %v", err))
 		}
 	}
 
@@ -273,50 +275,26 @@ func NewQueryEngine(env tabletenv.Env, se *schema.Engine) *QueryEngine {
 	env.Exporter().NewGaugeFunc("StreamBufferSize", "Query engine stream buffer size", qe.streamBufferSize.Load)
 	env.Exporter().NewCounterFunc("TableACLExemptCount", "Query engine table ACL exempt count", qe.tableaclExemptCount.Load)
 
-	// QueryCacheLength is deprecated in v21 and will be removed in >=v22. This metric is replaced by QueryEnginePlanCacheLength.
-	env.Exporter().NewGaugeFunc("QueryCacheLength", "Query engine query plan cache length (deprecated: please use QueryEnginePlanCacheLength)", func() int64 {
-		return int64(qe.plans.Len())
-	})
 	env.Exporter().NewGaugeFunc("QueryEnginePlanCacheLength", "Query engine query plan cache length", func() int64 {
 		return int64(qe.plans.Len())
 	})
 
-	// QueryCacheSize is deprecated in v21 and will be removed in >=v22. This metric is replaced QueryEnginePlanCacheSize.
-	env.Exporter().NewGaugeFunc("QueryCacheSize", "Query engine query plan cache size (deprecated: please use QueryEnginePlanCacheSize)", func() int64 {
-		return int64(qe.plans.UsedCapacity())
-	})
 	env.Exporter().NewGaugeFunc("QueryEnginePlanCacheSize", "Query engine query plan cache size", func() int64 {
 		return int64(qe.plans.UsedCapacity())
 	})
 
-	// QueryCacheCapacity is deprecated in v21 and will be removed in >=v22. This metric is replaced by QueryEnginePlanCacheCapacity.
-	env.Exporter().NewGaugeFunc("QueryCacheCapacity", "Query engine query plan cache capacity (deprecated: please use QueryEnginePlanCacheCapacity)", func() int64 {
-		return int64(qe.plans.MaxCapacity())
-	})
 	env.Exporter().NewGaugeFunc("QueryEnginePlanCacheCapacity", "Query engine query plan cache capacity", func() int64 {
 		return int64(qe.plans.MaxCapacity())
 	})
 
-	// QueryCacheEvictions is deprecated in v21 and will be removed in >=v22. This metric is replaced by QueryEnginePlanCacheEvictions.
-	env.Exporter().NewCounterFunc("QueryCacheEvictions", "Query engine query plan cache evictions (deprecated: please use QueryEnginePlanCacheEvictions)", func() int64 {
-		return qe.plans.Metrics.Evicted()
-	})
 	env.Exporter().NewCounterFunc("QueryEnginePlanCacheEvictions", "Query engine query plan cache evictions", func() int64 {
 		return qe.plans.Metrics.Evicted()
 	})
 
-	// QueryCacheHits is deprecated in v21 and will be removed in >=v22. This metric is replaced by QueryEnginePlanCacheHits.
-	qe.queryCacheHitsDeprecated = env.Exporter().NewCounterFunc("QueryCacheHits", "Query engine query plan cache hits (deprecated: please use QueryEnginePlanCacheHits)", func() int64 {
-		return qe.plans.Metrics.Hits()
-	})
 	qe.queryEnginePlanCacheHits = env.Exporter().NewCounterFunc("QueryEnginePlanCacheHits", "Query engine query plan cache hits", func() int64 {
 		return qe.plans.Metrics.Hits()
 	})
 
-	// QueryCacheMisses is deprecated in v21 and will be removed in >=v22. This metric is replaced by QueryEnginePlanCacheMisses.
-	qe.queryCacheMissesDeprecated = env.Exporter().NewCounterFunc("QueryCacheMisses", "Query engine query plan cache misses (deprecated: please use QueryEnginePlanCacheMisses)", func() int64 {
-		return qe.plans.Metrics.Misses()
-	})
 	qe.queryEnginePlanCacheMisses = env.Exporter().NewCounterFunc("QueryEnginePlanCacheMisses", "Query engine query plan cache misses", func() int64 {
 		return qe.plans.Metrics.Misses()
 	})
@@ -399,12 +377,12 @@ func (qe *QueryEngine) Close() {
 
 var errNoCache = errors.New("plan should not be cached")
 
-func (qe *QueryEngine) getPlan(curSchema *currentSchema, sql string) (*TabletPlan, error) {
+func (qe *QueryEngine) getPlan(curSchema *currentSchema, sql string, noRowsLimit bool) (*TabletPlan, error) {
 	statement, err := qe.env.Environment().Parser().Parse(sql)
 	if err != nil {
 		return nil, err
 	}
-	splan, err := planbuilder.Build(qe.env.Environment(), statement, curSchema.tables, qe.env.Config().DB.DBName, qe.env.Config().EnableViews)
+	splan, err := planbuilder.Build(qe.env.Environment(), statement, curSchema.tables, qe.env.Config().DB.DBName, noRowsLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -419,7 +397,7 @@ func (qe *QueryEngine) getPlan(curSchema *currentSchema, sql string) (*TabletPla
 }
 
 // GetPlan returns the TabletPlan that for the query. Plans are cached in an LRU cache.
-func (qe *QueryEngine) GetPlan(ctx context.Context, logStats *tabletenv.LogStats, sql string, skipQueryPlanCache bool) (*TabletPlan, error) {
+func (qe *QueryEngine) GetPlan(ctx context.Context, logStats *tabletenv.LogStats, sql string, skipQueryPlanCache bool, noRowsLimit bool) (*TabletPlan, error) {
 	span, _ := trace.NewSpan(ctx, "QueryEngine.GetPlan")
 	defer span.Finish()
 
@@ -429,10 +407,10 @@ func (qe *QueryEngine) GetPlan(ctx context.Context, logStats *tabletenv.LogStats
 	curSchema := qe.schema.Load()
 
 	if skipQueryPlanCache {
-		plan, err = qe.getPlan(curSchema, sql)
+		plan, err = qe.getPlan(curSchema, sql, noRowsLimit)
 	} else {
-		plan, logStats.CachedPlan, err = qe.plans.GetOrLoad(PlanCacheKey(sql), curSchema.epoch, func() (*TabletPlan, error) {
-			return qe.getPlan(curSchema, sql)
+		plan, logStats.CachedPlan, err = qe.plans.GetOrLoad(PlanCacheKey(qe.getPlanCacheKey(sql, noRowsLimit)), curSchema.epoch, func() (*TabletPlan, error) {
+			return qe.getPlan(curSchema, sql, noRowsLimit)
 		})
 	}
 
@@ -449,7 +427,6 @@ func (qe *QueryEngine) getStreamPlan(curSchema *currentSchema, sql string) (*Tab
 	}
 
 	splan, err := planbuilder.BuildStreaming(statement, curSchema.tables)
-
 	if err != nil {
 		return nil, err
 	}
@@ -492,6 +469,14 @@ func (qe *QueryEngine) GetStreamPlan(ctx context.Context, logStats *tabletenv.Lo
 // gets key used to cache stream query plan
 func (qe *QueryEngine) getStreamPlanCacheKey(sql string) string {
 	return "__STREAM__" + sql
+}
+
+// gets key used to cache stream query plan
+func (qe *QueryEngine) getPlanCacheKey(sql string, noRowsLimit bool) string {
+	if noRowsLimit {
+		return "__UNLIMITED__" + sql
+	}
+	return sql
 }
 
 // GetMessageStreamPlan builds a plan for Message streaming.
@@ -653,7 +638,7 @@ func (qe *QueryEngine) handleHTTPQueryPlans(response http.ResponseWriter, reques
 
 	response.Header().Set("Content-Type", "text/plain")
 	qe.ForEachPlan(func(plan *TabletPlan) bool {
-		response.Write([]byte(fmt.Sprintf("%#v\n", qe.env.Environment().Parser().TruncateForUI(plan.Original))))
+		fmt.Fprintf(response, "%#v\n", qe.env.Environment().Parser().TruncateForUI(plan.Original))
 		if b, err := json.MarshalIndent(plan.Plan, "", "  "); err != nil {
 			response.Write([]byte(err.Error()))
 		} else {
@@ -737,7 +722,7 @@ func (qe *QueryEngine) handleHTTPConsolidations(response http.ResponseWriter, re
 		response.Write([]byte("empty\n"))
 		return
 	}
-	response.Write([]byte(fmt.Sprintf("Length: %d\n", len(items))))
+	fmt.Fprintf(response, "Length: %d\n", len(items))
 	for _, v := range items {
 		var query string
 		if qe.redactUIQuery {
@@ -745,7 +730,7 @@ func (qe *QueryEngine) handleHTTPConsolidations(response http.ResponseWriter, re
 		} else {
 			query = v.Query
 		}
-		response.Write([]byte(fmt.Sprintf("%v: %s\n", v.Count, query)))
+		fmt.Fprintf(response, "%v: %s\n", v.Count, query)
 	}
 }
 

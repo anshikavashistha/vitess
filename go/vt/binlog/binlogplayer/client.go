@@ -18,6 +18,8 @@ package binlogplayer
 
 import (
 	"context"
+	"fmt"
+	"os"
 
 	"github.com/spf13/pflag"
 
@@ -25,6 +27,7 @@ import (
 	binlogdatapb "vitess.io/vitess/go/vt/proto/binlogdata"
 	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
 	"vitess.io/vitess/go/vt/servenv"
+	vtutils "vitess.io/vitess/go/vt/utils"
 )
 
 /*
@@ -39,7 +42,7 @@ func init() {
 }
 
 func registerFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&binlogPlayerProtocol, "binlog_player_protocol", binlogPlayerProtocol, "the protocol to download binlogs from a vttablet")
+	vtutils.SetFlagStringVar(fs, &binlogPlayerProtocol, "binlog-player-protocol", binlogPlayerProtocol, "the protocol to download binlogs from a vttablet")
 }
 
 // BinlogTransactionStream is the interface of the object returned by
@@ -75,7 +78,8 @@ var clientFactories = make(map[string]ClientFactory)
 // RegisterClientFactory adds a new factory. Call during init().
 func RegisterClientFactory(name string, factory ClientFactory) {
 	if _, ok := clientFactories[name]; ok {
-		log.Fatalf("ClientFactory %s already exists", name)
+		log.Error(fmt.Sprintf("ClientFactory %s already exists", name))
+		os.Exit(1)
 	}
 	clientFactories[name] = factory
 }

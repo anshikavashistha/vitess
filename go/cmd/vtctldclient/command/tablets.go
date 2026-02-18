@@ -304,7 +304,6 @@ func commandDeleteTablets(cmd *cobra.Command, args []string) error {
 		TabletAliases: aliases,
 		AllowPrimary:  deleteTabletsOptions.AllowPrimary,
 	})
-
 	if err != nil {
 		return fmt.Errorf("%w: while deleting %d tablets; please inspect the topo", err, len(aliases))
 	}
@@ -547,9 +546,9 @@ func commandRefreshStateByShard(cmd *cobra.Command, args []string) error {
 	}
 
 	msg := &strings.Builder{}
-	msg.WriteString(fmt.Sprintf("Refreshed state on %s/%s", keyspace, shard))
+	fmt.Fprintf(msg, "Refreshed state on %s/%s", keyspace, shard)
 	if len(refreshStateByShardOptions.Cells) > 0 {
-		msg.WriteString(fmt.Sprintf(" in cells %s", strings.Join(refreshStateByShardOptions.Cells, ", ")))
+		fmt.Fprintf(msg, " in cells %s", strings.Join(refreshStateByShardOptions.Cells, ", "))
 	}
 	msg.WriteByte('\n')
 	if resp.IsPartialRefresh {

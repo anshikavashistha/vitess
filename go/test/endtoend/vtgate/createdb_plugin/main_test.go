@@ -17,21 +17,19 @@ limitations under the License.
 package unsharded
 
 import (
-	"context"
 	"flag"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"vitess.io/vitess/go/test/endtoend/utils"
-
 	"github.com/stretchr/testify/assert"
-
 	"github.com/stretchr/testify/require"
 
 	"vitess.io/vitess/go/mysql"
 	"vitess.io/vitess/go/test/endtoend/cluster"
+	"vitess.io/vitess/go/test/endtoend/utils"
+	vtutils "vitess.io/vitess/go/vt/utils"
 )
 
 var (
@@ -55,15 +53,16 @@ func TestMain(m *testing.M) {
 		}
 
 		// Start keyspace
+		cell := clusterInstance.Cell
 		keyspace := &cluster.Keyspace{
 			Name: keyspaceName,
 		}
-		if err := clusterInstance.StartKeyspace(*keyspace, []string{"-80", "80-"}, 0, false); err != nil {
+		if err := clusterInstance.StartKeyspace(*keyspace, []string{"-80", "80-"}, 0, false, cell); err != nil {
 			return 1
 		}
 
 		// Start vtgate
-		clusterInstance.VtGateExtraArgs = []string{"--dbddl_plugin", "noop", "--mysql_server_query_timeout", "60s"}
+		clusterInstance.VtGateExtraArgs = []string{vtutils.GetFlagVariantForTests("--dbddl-plugin"), "noop", vtutils.GetFlagVariantForTests("--mysql-server-query-timeout"), "60s"}
 		vtgateProcess := clusterInstance.NewVtgateInstance()
 		vtgateProcess.SysVarSetEnabled = true
 		if err := vtgateProcess.Setup(); err != nil {
@@ -80,7 +79,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestDBDDLPlugin(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	vtParams := mysql.ConnParams{
 		Host: "localhost",
 		Port: clusterInstance.VtgateMySQLPort,
@@ -91,12 +90,10 @@ func TestDBDDLPlugin(t *testing.T) {
 
 	createAndDrop := func(t *testing.T) {
 		wg := sync.WaitGroup{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			qr := utils.Exec(t, conn, `create database aaa`)
 			require.EqualValues(t, 1, qr.RowsAffected)
-		}()
+		})
 		time.Sleep(300 * time.Millisecond)
 		start(t, "aaa")
 
@@ -108,11 +105,9 @@ func TestDBDDLPlugin(t *testing.T) {
 		utils.Exec(t, conn, `insert into t(id) values (1),(2),(3),(4),(5)`)
 		utils.AssertMatches(t, conn, "select count(*) from t", `[[INT64(5)]]`)
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_ = utils.Exec(t, conn, `drop database aaa`)
-		}()
+		})
 		time.Sleep(300 * time.Millisecond)
 		shutdown(t, "aaa")
 
@@ -137,7 +132,7 @@ func start(t *testing.T, ksName string) {
 		Name: ksName,
 	}
 	require.NoError(t,
-		clusterInstance.StartUnshardedKeyspace(*keyspace, 0, false),
+		clusterInstance.StartUnshardedKeyspace(*keyspace, 0, false, clusterInstance.Cell),
 		"new database creation failed")
 }
 

@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/stretchr/testify/assert"
 
 	"vitess.io/vitess/go/test/endtoend/utils"
@@ -37,7 +39,7 @@ func TestSimpleInsertSelect(t *testing.T) {
 
 	for i, mode := range []string{"oltp", "olap"} {
 		mcmp.Run(mode, func(mcmp *utils.MySQLCompare) {
-			utils.Exec(t, mcmp.VtConn, fmt.Sprintf("set workload = %s", mode))
+			utils.Exec(t, mcmp.VtConn, "set workload = "+mode)
 
 			qr := mcmp.Exec(fmt.Sprintf("insert into s_tbl(id, num) select id*%d, num*%d from s_tbl where id < 10", 10+i, 20+i))
 			assert.EqualValues(t, 2, qr.RowsAffected)
@@ -61,7 +63,7 @@ func TestInsertOnDup(t *testing.T) {
 
 	for _, mode := range []string{"oltp", "olap"} {
 		mcmp.Run(mode, func(mcmp *utils.MySQLCompare) {
-			utils.Exec(t, mcmp.VtConn, fmt.Sprintf("set workload = %s", mode))
+			utils.Exec(t, mcmp.VtConn, "set workload = "+mode)
 
 			mcmp.Exec(`insert into order_tbl(oid, region_id, cust_no) values (2,2,3),(4,4,5) on duplicate key update cust_no = if(values(cust_no) in (1, 2, 3), region_id, values(cust_no))`)
 			mcmp.Exec(`select oid, region_id, cust_no from order_tbl order by oid, region_id`)
@@ -83,7 +85,7 @@ func TestFailureInsertSelect(t *testing.T) {
 
 	for _, mode := range []string{"oltp", "olap"} {
 		mcmp.Run(mode, func(mcmp *utils.MySQLCompare) {
-			utils.Exec(t, mcmp.VtConn, fmt.Sprintf("set workload = %s", mode))
+			utils.Exec(t, mcmp.VtConn, "set workload = "+mode)
 
 			// primary key same
 			mcmp.AssertContainsError("insert into s_tbl(id, num) select id, num*20 from s_tbl where id = 1", `AlreadyExists desc = Duplicate entry '1' for key`)
@@ -395,7 +397,7 @@ func TestInsertSelectUnshardedUsingSharded(t *testing.T) {
 
 	for _, mode := range []string{"oltp", "olap"} {
 		mcmp.Run(mode, func(mcmp *utils.MySQLCompare) {
-			utils.Exec(t, mcmp.VtConn, fmt.Sprintf("set workload = %s", mode))
+			utils.Exec(t, mcmp.VtConn, "set workload = "+mode)
 			qr := mcmp.Exec("insert into u_tbl(id, num) select id, num from s_tbl where s_tbl.id in (1,3)")
 			assert.EqualValues(t, 2, qr.RowsAffected)
 			mcmp.AssertMatches(`select id, num from u_tbl order by id`, `[[INT64(1) INT64(2)] [INT64(3) INT64(4)]]`)
@@ -515,4 +517,31 @@ func TestInsertJson(t *testing.T) {
 	utils.Exec(t, mcmp.VtConn, `insert into uks.j_utbl(id, jdoc) select * from sks.j_tbl`)
 	utils.AssertMatches(t, mcmp.VtConn, `select * from uks.j_utbl order by id`,
 		`[[INT64(1) JSON("{}")] [INT64(2) JSON("{\"a\": 1, \"b\": 2}")] [INT64(3) JSON("{\"k\": \"a\"}")] [INT64(4) JSON("{\"date\": 1629849600, \"keywordSourceId\": 930701976723823, \"keywordSourceVersionId\": 210825230433}")]]`)
+
+	mcmp.Exec(`insert into j_tbl(id, jdoc) values (10, '{}'), (20, "[]")`)
+}
+
+func TestInsertIgnoreNullAndInsertNull(t *testing.T) {
+	mcmp, closer := start(t)
+	defer closer()
+
+	mcmp.Exec("insert ignore into s_tbl(id) values (1)") // the remaining columns are be set to NULL
+	mcmp.Exec("select id, num, col from s_tbl")
+	mcmp.Exec("insert ignore into s_tbl(id, num, col) values (2, 2, 2), (3, NULL, 3), (4, 4, NULL)")
+	mcmp.Exec("insert into s_tbl(id, num, col) values (5, 5, 5), (6, NULL, 6), (7, 7, NULL)")
+	mcmp.Exec("select id, num, col from s_tbl")
+	utils.AssertMatches(t, mcmp.VtConn, "select num, hex(keyspace_id) from num_vdx_tbl order by num",
+		`[[INT64(2) VARCHAR("06E7EA22CE92708F")] [INT64(4) VARCHAR("D2FD8867D50D2DFE")] [INT64(5) VARCHAR("70BB023C810CA87A")] [INT64(7) VARCHAR("FB8BAAAD918119B8")]]`)
+	utils.AssertMatches(t, mcmp.VtConn, "select col, id, hex(keyspace_id) from col_vdx_tbl order by col, id",
+		`[[INT64(2) INT64(2) VARCHAR("06E7EA22CE92708F")] [INT64(3) INT64(3) VARCHAR("4EB190C9A2FA169C")] [INT64(5) INT64(5) VARCHAR("70BB023C810CA87A")] [INT64(6) INT64(6) VARCHAR("F098480AC4C4BE71")]]`)
+
+	mcmp.Exec("insert ignore into name_tbl(id, name) values (1, 'foo'), (2, 'bar')")
+	mcmp.Exec("select id, name from name_tbl order by id")
+
+	// This should contain the one row that was inserted above
+	utils.AssertMatches(t, mcmp.VtConn, "select name, id, hex(keyspace_id) from name_vdx_tbl order by name, id",
+		`[[VARCHAR("bar") INT64(2) VARCHAR("06E7EA22CE92708F")] [VARCHAR("foo") INT64(1) VARCHAR("166B40B44ABA4BD6")]]`)
+
+	_, err := utils.ExecAllowError(t, mcmp.VtConn, "insert ignore into name_tbl(id, name) values (22, NULL)") // this should fail, since we have a vindex that does not ignore nulls
+	require.ErrorContains(t, err, "Column 'name,id' cannot be null")
 }

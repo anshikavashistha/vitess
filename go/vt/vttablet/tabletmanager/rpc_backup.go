@@ -18,9 +18,12 @@ package tabletmanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"vitess.io/vitess/go/protoutil"
+	"vitess.io/vitess/go/vt/proto/vttime"
 	"vitess.io/vitess/go/vt/topotools"
 	"vitess.io/vitess/go/vt/vtctl/reparentutil/policy"
 
@@ -42,7 +45,7 @@ const (
 // Backup takes a db backup and sends it to the BackupStorage.
 func (tm *TabletManager) Backup(ctx context.Context, logger logutil.Logger, req *tabletmanagerdatapb.BackupRequest) error {
 	if tm.Cnf == nil {
-		return fmt.Errorf("cannot perform backup without my.cnf, please restart vttablet with a my.cnf file specified")
+		return errors.New("cannot perform backup without my.cnf, please restart vttablet with a my.cnf file specified")
 	}
 
 	// Check tablet type current process has.
@@ -51,7 +54,7 @@ func (tm *TabletManager) Backup(ctx context.Context, logger logutil.Logger, req 
 	// It is not safe to take backups from tablet in this state
 	currentTablet := tm.Tablet()
 	if !req.AllowPrimary && currentTablet.Type == topodatapb.TabletType_PRIMARY {
-		return fmt.Errorf("type PRIMARY cannot take backup. if you really need to do this, rerun the backup command with --allow_primary")
+		return errors.New("type PRIMARY cannot take backup. if you really need to do this, rerun the backup command with --allow_primary")
 	}
 
 	backupEngine := ""
@@ -69,7 +72,34 @@ func (tm *TabletManager) Backup(ctx context.Context, logger logutil.Logger, req 
 		return err
 	}
 	if !req.AllowPrimary && tablet.Type == topodatapb.TabletType_PRIMARY {
-		return fmt.Errorf("type PRIMARY cannot take backup. if you really need to do this, rerun the backup command with --allow_primary")
+		return errors.New("type PRIMARY cannot take backup. if you really need to do this, rerun the backup command with --allow_primary")
+	}
+
+	// Create the logger: tee to console and source.
+	l := logutil.NewTeeLogger(logutil.NewConsoleLogger(), logger)
+
+	backupParams := mysqlctl.BackupParams{
+		Cnf:                  tm.Cnf,
+		Mysqld:               tm.MysqlDaemon,
+		Logger:               l,
+		Concurrency:          int(req.Concurrency),
+		IncrementalFromPos:   req.IncrementalFromPos,
+		HookExtraEnv:         tm.hookExtraEnv(),
+		TopoServer:           tm.TopoServer,
+		Keyspace:             tablet.Keyspace,
+		Shard:                tablet.Shard,
+		TabletAlias:          topoproto.TabletAliasString(tablet.Alias),
+		TabletType:           tablet.Type,
+		Stats:                backupstats.BackupStats(),
+		UpgradeSafe:          req.UpgradeSafe,
+		MysqlShutdownTimeout: shutdownTimeout(l, req.MysqlShutdownTimeout),
+		BackupEngine:         backupEngine,
+		InitSQL:              req.InitSql.CloneVT(),
+	}
+
+	// Perform any requested pre backup initialization queries.
+	if err := mysqlctl.ExecuteBackupInitSQL(ctx, &backupParams); err != nil {
+		return vterrors.Wrap(err, "failed to execute backup init SQL queries")
 	}
 
 	// Prevent concurrent backups, and record stats
@@ -81,9 +111,6 @@ func (tm *TabletManager) Backup(ctx context.Context, logger logutil.Logger, req 
 		return err
 	}
 	defer tm.endBackup(backupMode)
-
-	// Create the logger: tee to console and source.
-	l := logutil.NewTeeLogger(logutil.NewConsoleLogger(), logger)
 
 	var originalType topodatapb.TabletType
 	if engine.ShouldDrainForBackup(req) {
@@ -154,24 +181,7 @@ func (tm *TabletManager) Backup(ctx context.Context, logger logutil.Logger, req 
 	}
 
 	// Now we can run the backup.
-	backupParams := mysqlctl.BackupParams{
-		Cnf:                  tm.Cnf,
-		Mysqld:               tm.MysqlDaemon,
-		Logger:               l,
-		Concurrency:          int(req.Concurrency),
-		IncrementalFromPos:   req.IncrementalFromPos,
-		HookExtraEnv:         tm.hookExtraEnv(),
-		TopoServer:           tm.TopoServer,
-		Keyspace:             tablet.Keyspace,
-		Shard:                tablet.Shard,
-		TabletAlias:          topoproto.TabletAliasString(tablet.Alias),
-		BackupTime:           time.Now(),
-		Stats:                backupstats.BackupStats(),
-		UpgradeSafe:          req.UpgradeSafe,
-		MysqlShutdownTimeout: mysqlShutdownTimeout,
-		BackupEngine:         backupEngine,
-	}
-
+	backupParams.BackupTime = time.Now()
 	returnErr := mysqlctl.Backup(ctx, backupParams)
 
 	return returnErr
@@ -190,14 +200,14 @@ func (tm *TabletManager) RestoreFromBackup(ctx context.Context, logger logutil.L
 		return err
 	}
 	if tablet.Type == topodatapb.TabletType_PRIMARY {
-		return fmt.Errorf("type PRIMARY cannot restore from backup, if you really need to do this, restart vttablet in replica mode")
+		return errors.New("type PRIMARY cannot restore from backup, if you really need to do this, restart vttablet in replica mode")
 	}
 
 	// Create the logger: tee to console and source.
 	l := logutil.NewTeeLogger(logutil.NewConsoleLogger(), logger)
 
 	// Now we can run restore.
-	err = tm.restoreDataLocked(ctx, l, 0 /* waitForBackupInterval */, true /* deleteBeforeRestore */, request, mysqlShutdownTimeout)
+	err = tm.restoreBackupLocked(ctx, l, 0 /* waitForBackupInterval */, true /* deleteBeforeRestore */, request, mysqlShutdownTimeout)
 
 	// Re-run health check to be sure to capture any replication delay.
 	tm.QueryServiceControl.BroadcastHealth()
@@ -232,4 +242,17 @@ func (tm *TabletManager) endBackup(backupMode string) {
 	defer tm.mutex.Unlock()
 	tm._isBackupRunning = false
 	statsBackupIsRunning.Set([]string{backupMode}, 0)
+}
+
+func shutdownTimeout(l logutil.Logger, tm *vttime.Duration) time.Duration {
+	timeout, ok, err := protoutil.DurationFromProto(tm)
+	if err != nil {
+		l.Errorf("failed to parse mysql shutdown timeout, falling back to default: %v", err)
+		return mysqlShutdownTimeout
+	}
+	if !ok {
+		// Nothing configured, fallback to default
+		return mysqlShutdownTimeout
+	}
+	return timeout
 }

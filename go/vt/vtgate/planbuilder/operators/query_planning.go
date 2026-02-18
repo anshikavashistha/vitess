@@ -21,6 +21,9 @@ import (
 	"io"
 	"strconv"
 
+	"vitess.io/vitess/go/slice"
+	"vitess.io/vitess/go/vt/vtgate/planbuilder/operators/predicates"
+
 	"vitess.io/vitess/go/vt/sqlparser"
 	"vitess.io/vitess/go/vt/vterrors"
 	"vitess.io/vitess/go/vt/vtgate/engine"
@@ -56,6 +59,20 @@ func planQuery(ctx *plancontext.PlanningContext, root Operator) Operator {
 func runPhases(ctx *plancontext.PlanningContext, root Operator) Operator {
 	op := root
 
+	// Run phases on both source and target operator of mirror operators, and
+	// update the mirror inputs with the results.
+	if pbm, ok := root.(*PercentBasedMirror); ok {
+		// Create mirror context before running phases on source operator,
+		// otherwise we'll end up initializing mirror context with final
+		// phase of source context.
+		mirrorCtx := ctx.UseMirror()
+		pbm.SetInputs([]Operator{
+			runPhases(ctx, pbm.Operator()),
+			runPhases(mirrorCtx, pbm.Target()),
+		})
+		return pbm
+	}
+
 	p := phaser{}
 	for phase := p.next(ctx); phase != DONE; phase = p.next(ctx) {
 		ctx.CurrentPhase = int(phase)
@@ -75,6 +92,8 @@ func runRewriters(ctx *plancontext.PlanningContext, root Operator) Operator {
 		switch in := in.(type) {
 		case *Horizon:
 			return pushOrExpandHorizon(ctx, in)
+		case *ApplyJoin:
+			return tryMergeApplyJoin(in, ctx)
 		case *Join:
 			return optimizeJoin(ctx, in)
 		case *Projection:
@@ -103,26 +122,91 @@ func runRewriters(ctx *plancontext.PlanningContext, root Operator) Operator {
 			return tryPushUpdate(in)
 		case *RecurseCTE:
 			return tryMergeRecurse(ctx, in)
-
 		default:
 			return in, NoRewrite
 		}
 	}
 
-	if pbm, ok := root.(*PercentBasedMirror); ok {
-		pbm.SetInputs([]Operator{
-			runRewriters(ctx, pbm.Operator()),
-			runRewriters(ctx.UseMirror(), pbm.Target()),
-		})
+	return FixedPointBottomUp(root, TableID, visitor, stopAtRoute)
+}
+
+func tryMergeApplyJoin(in *ApplyJoin, ctx *plancontext.PlanningContext) (_ Operator, res *ApplyResult) {
+	preds := slice.Map(in.JoinPredicates.columns, func(col applyJoinColumn) sqlparser.Expr {
+		return col.Original
+	})
+
+	jm := newJoinMerge(preds, in.JoinType)
+	r := jm.mergeJoinInputs(ctx, in.LHS, in.RHS)
+	if r == nil {
+		// Specific failure reason already logged by mergeJoinInputs
+		return in, NoRewrite
+	}
+	aj, ok := r.Source.(*ApplyJoin)
+	if !ok {
+		panic(vterrors.VT13001("expected apply join"))
 	}
 
-	return FixedPointBottomUp(root, TableID, visitor, stopAtRoute)
+	// Copy the join predicates from the original ApplyJoin to the new one.
+	aj.JoinPredicates = in.JoinPredicates
+
+	//  - Rewrite join predicates already pushed down &&
+	//  - Save original join predicates if we have to bail out of the rewrite
+	original := map[predicates.ID]sqlparser.Expr{}
+	for _, col := range aj.JoinPredicates.columns {
+		if col.JoinPredicateID != nil {
+			// if we have pushed down a join predicate, we need to restore it to its original shape, without the argument from the LHS
+			id := *col.JoinPredicateID
+			oldExpr, err := ctx.PredTracker.Get(id)
+			if err != nil {
+				panic(err)
+			}
+			original[id] = oldExpr
+			ctx.PredTracker.Set(id, col.Original)
+		}
+	}
+
+	// Defer restoration of original predicates if no successful rewrite happens.
+	defer func() {
+		if res == NoRewrite {
+			for id, expr := range original {
+				ctx.PredTracker.Set(id, expr)
+			}
+		}
+	}()
+
+	// After merging joins, routing logic may have changed. Re-evaluate routing decisions.
+	// Example scenario:
+	// Before merge: routing based on predicates like ':lhs_col = rhs.col'.
+	// After merge: predicate rewritten to 'lhs.col = rhs.col', making this predicate invalid for routing.
+	r.Routing = r.Routing.resetRoutingLogic(ctx)
+
+	// Verify if the LHS is a Route operator, which is required for this rewrite.
+	rb, ok := in.LHS.(*Route)
+	success := "pushed ApplyJoin under Route"
+	if !ok {
+		// Unexpected scenario: LHS is not a Route; abort rewrite.
+		debugNoRewrite("apply join merge blocked: LHS is not a Route")
+		return in, NoRewrite
+	}
+
+	// Special case: If LHS is a DualRouting AND the join isn't INNER or targeting a single shard,
+	// we cannot safely perform this rewrite.
+	if _, isDual := rb.Routing.(*DualRouting); isDual &&
+		(!jm.joinType.IsInner() && !r.Routing.OpCode().IsSingleShard()) {
+		// to check the resulting opcode, we've used the original predicates.
+		// Since we are not using them, we need to restore the argument versions of the predicates
+		debugNoRewrite("apply join merge blocked: dual routing with non-inner join and multi-shard target")
+		return in, NoRewrite
+	}
+
+	return r, Rewrote(success)
 }
 
 func tryPushDelete(in *Delete) (Operator, *ApplyResult) {
 	if src, ok := in.Source.(*Route); ok {
 		return pushDMLUnderRoute(in, src, "pushed delete under route")
 	}
+	debugNoRewrite("delete push blocked: source is not a Route")
 	return in, NoRewrite
 }
 
@@ -130,6 +214,7 @@ func tryPushUpdate(in *Update) (Operator, *ApplyResult) {
 	if src, ok := in.Source.(*Route); ok {
 		return pushDMLUnderRoute(in, src, "pushed update under route")
 	}
+	debugNoRewrite("update push blocked: source is not a Route")
 	return in, NoRewrite
 }
 
@@ -183,6 +268,7 @@ func pushOrExpandHorizon(ctx *plancontext.PlanningContext, in *Horizon) (Operato
 	}
 
 	if !reachedPhase(ctx, initialPlanning) {
+		debugNoRewrite("horizon push blocked: not reached initialPlanning phase")
 		return in, NoRewrite
 	}
 
@@ -206,11 +292,29 @@ func pushOrExpandHorizon(ctx *plancontext.PlanningContext, in *Horizon) (Operato
 		!hasHaving &&
 		!needsOrdering &&
 		!qp.NeedsAggregation() &&
+		!qp.HasWindow &&
 		!isDistinctAST(in.selectStatement()) &&
 		in.selectStatement().GetLimit() == nil
 
 	if canPush {
 		return Swap(in, rb, "push horizon into route")
+	}
+
+	// Debug why we can't push the horizon
+	if !isRoute {
+		debugNoRewrite("horizon push blocked: source is not a Route")
+	} else if hasHaving {
+		debugNoRewrite("horizon push blocked: query has HAVING clause")
+	} else if needsOrdering {
+		debugNoRewrite("horizon push blocked: query has ORDER BY")
+	} else if qp.NeedsAggregation() {
+		debugNoRewrite("horizon push blocked: query needs aggregation")
+	} else if qp.HasWindow {
+		debugNoRewrite("horizon push blocked: query has window functions")
+	} else if isDistinctAST(in.selectStatement()) {
+		debugNoRewrite("horizon push blocked: query has DISTINCT")
+	} else if in.selectStatement().GetLimit() != nil {
+		debugNoRewrite("horizon push blocked: query has LIMIT")
 	}
 
 	return expandHorizon(ctx, in)
@@ -221,10 +325,12 @@ func tryPushLimit(ctx *plancontext.PlanningContext, in *Limit) (Operator, *Apply
 	case *Route:
 		return tryPushingDownLimitInRoute(ctx, in, src)
 	case *Aggregator:
+		debugNoRewrite("limit push blocked: cannot push limit under aggregator")
 		return in, NoRewrite
 	case *ApplyJoin:
 		if in.Pushed {
 			// This is the Top limit, and it's already pushed down
+			debugNoRewrite("limit push blocked: limit already pushed down")
 			return in, NoRewrite
 		}
 		side := "RHS"
@@ -245,13 +351,13 @@ func tryPushLimit(ctx *plancontext.PlanningContext, in *Limit) (Operator, *Apply
 	case *Limit:
 		combinedLimit := mergeLimits(in.AST, src.AST)
 		if combinedLimit == nil {
+			debugNoRewrite("limit push blocked: cannot merge limits")
 			break
 		}
 		// we can remove the other LIMIT
 		in.AST = combinedLimit
 		in.Source = src.Source
 		return in, Rewrote("merged two limits")
-
 	}
 	return setUpperLimit(in)
 }
@@ -366,10 +472,7 @@ func mergeLimitExpressions(l1, l2, off2 sqlparser.Expr) (expr sqlparser.Expr, fa
 		// Calculate the remaining limit after the offset.
 		off2int, _ := strconv.Atoi(off2.Val)
 		l1int, _ := strconv.Atoi(lim1str.Val)
-		lim := l1int - off2int
-		if lim < 0 {
-			lim = 0
-		}
+		lim := max(l1int-off2int, 0)
 		return sqlparser.NewIntLiteral(strconv.Itoa(lim)), false
 
 	default:
@@ -400,11 +503,9 @@ func mergeLimitExpressions(l1, l2, off2 sqlparser.Expr) (expr sqlparser.Expr, fa
 
 		v1, _ := strconv.Atoi(v1str.Val)
 		v2, _ := strconv.Atoi(v2str.Val)
-		lim := min(v2, v1-off2int)
-		if lim < 0 {
+		lim := max(min(v2, v1-off2int),
 			// If the combined limit is negative, set it to zero.
-			lim = 0
-		}
+			0)
 		return sqlparser.NewIntLiteral(strconv.Itoa(lim)), false
 	}
 }
@@ -457,6 +558,7 @@ func tryPushingDownLimitInRoute(ctx *plancontext.PlanningContext, in *Limit, src
 
 	// this limit has already been pushed down, nothing to do here
 	if in.Pushed {
+		debugNoRewrite("limit push blocked: limit already pushed down in route")
 		return in, NoRewrite
 	}
 
@@ -472,6 +574,7 @@ func tryPushingDownLimitInRoute(ctx *plancontext.PlanningContext, in *Limit, src
 
 func setUpperLimit(in *Limit) (Operator, *ApplyResult) {
 	if in.Pushed {
+		debugNoRewrite("limit push blocked: upper limit already set")
 		return in, NoRewrite
 	}
 	in.Pushed = true
@@ -513,6 +616,7 @@ func tryPushOrdering(ctx *plancontext.PlanningContext, in *Ordering) (Operator, 
 		if canPushLeft(ctx, src, in.Order) {
 			return pushOrderLeftOfJoin(src, in)
 		}
+		debugNoRewrite("ordering push blocked: cannot push ordering to left side of apply join")
 	case *Ordering:
 		// we'll just remove the order underneath. The top order replaces whatever was incoming
 		in.Source = src.Source
@@ -521,6 +625,7 @@ func tryPushOrdering(ctx *plancontext.PlanningContext, in *Ordering) (Operator, 
 		return pushOrderingUnderProjection(ctx, in, src)
 	case *Aggregator:
 		if !src.QP.AlignGroupByAndOrderBy(ctx) && !overlaps(ctx, in.Order, src.Grouping) {
+			debugNoRewrite("ordering push blocked: GROUP BY and ORDER BY cannot be aligned and don't overlap")
 			return in, NoRewrite
 		}
 
@@ -528,6 +633,7 @@ func tryPushOrdering(ctx *plancontext.PlanningContext, in *Ordering) (Operator, 
 	case *SubQueryContainer:
 		return pushOrderingToOuterOfSubqueryContainer(ctx, in, src)
 	}
+	debugNoRewrite("ordering push blocked: unsupported source operator type %T", in.Source)
 	return in, NoRewrite
 }
 
@@ -536,6 +642,7 @@ func pushOrderingToOuterOfSubqueryContainer(ctx *plancontext.PlanningContext, in
 	for _, order := range in.Order {
 		deps := ctx.SemTable.RecursiveDeps(order.Inner.Expr)
 		if !deps.IsSolvedBy(outerTableID) {
+			debugNoRewrite("ordering push blocked: order expression depends on inner query tables")
 			return in, NoRewrite
 		}
 	}
@@ -547,15 +654,18 @@ func pushOrderingUnderProjection(ctx *plancontext.PlanningContext, in *Ordering,
 	// we can move ordering under a projection if it's not introducing a column we're sorting by
 	for _, by := range in.Order {
 		if !mustFetchFromInput(ctx, by.SimplifiedExpr) {
+			debugNoRewrite("ordering push blocked: order expression introduces new column")
 			return in, NoRewrite
 		}
 	}
 	ap, ok := proj.Columns.(AliasedProjections)
 	if !ok {
+		debugNoRewrite("ordering push blocked: projection columns not aliased")
 		return in, NoRewrite
 	}
 	for _, projExpr := range ap {
 		if projExpr.Info != nil {
+			debugNoRewrite("ordering push blocked: projection has expression with metadata")
 			return in, NoRewrite
 		}
 	}
@@ -693,6 +803,7 @@ func tryPushFilter(ctx *plancontext.PlanningContext, in *Filter) (Operator, *App
 		for _, pred := range in.Predicates {
 			deps := ctx.SemTable.RecursiveDeps(pred)
 			if !deps.IsSolvedBy(outerTableID) {
+				debugNoRewrite("filter push blocked: predicate depends on inner subquery tables")
 				return in, NoRewrite
 			}
 		}
@@ -705,6 +816,7 @@ func tryPushFilter(ctx *plancontext.PlanningContext, in *Filter) (Operator, *App
 
 		other, isFilter := in.Source.(*Filter)
 		if !isFilter {
+			debugNoRewrite("filter push blocked: source is not a filter for merging")
 			return in, NoRewrite
 		}
 		in.Source = other.Source
@@ -712,6 +824,7 @@ func tryPushFilter(ctx *plancontext.PlanningContext, in *Filter) (Operator, *App
 		return in, Rewrote("two filters merged into one")
 	}
 
+	debugNoRewrite("filter push blocked: unsupported source operator type %T", in.Source)
 	return in, NoRewrite
 }
 
@@ -732,6 +845,7 @@ func pushFilterUnderProjection(ctx *plancontext.PlanningContext, filter *Filter,
 		}, p)
 
 		if cantPush {
+			debugNoRewrite("filter push blocked: predicate needs evaluation in projection")
 			return filter, NoRewrite
 		}
 	}
@@ -740,6 +854,7 @@ func pushFilterUnderProjection(ctx *plancontext.PlanningContext, filter *Filter,
 
 func tryPushDistinct(in *Distinct) (Operator, *ApplyResult) {
 	if in.Required && in.PushedPerformance {
+		debugNoRewrite("distinct push blocked: distinct is required and performance optimization already applied")
 		return in, NoRewrite
 	}
 	switch src := in.Source.(type) {
@@ -752,6 +867,7 @@ func tryPushDistinct(in *Distinct) (Operator, *ApplyResult) {
 		}
 
 		if isDistinct(src.Source) {
+			debugNoRewrite("distinct push blocked: source already has distinct")
 			return in, NoRewrite
 		}
 
@@ -785,6 +901,7 @@ func tryPushDistinct(in *Distinct) (Operator, *ApplyResult) {
 		return in, Rewrote("remove ordering under distinct")
 	}
 
+	debugNoRewrite("distinct push blocked: unsupported source operator type %T", in.Source)
 	return in, NoRewrite
 }
 
@@ -834,6 +951,7 @@ func tryPushUnion(ctx *plancontext.PlanningContext, op *Union) (Operator, *Apply
 	}
 
 	if len(sources) == len(op.Sources) {
+		debugNoRewrite("union push blocked: no sources could be merged")
 		return op, NoRewrite
 	}
 	return newUnion(sources, selects, op.unionColumns, op.distinct), Rewrote("merge union inputs")

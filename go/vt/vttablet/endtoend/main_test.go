@@ -178,7 +178,8 @@ create table vitess_acl_read_only(key1 bigint default 0, key2 bigint default nul
 create table vitess_acl_read_write(key1 bigint default 0, key2 bigint default null, primary key(key1));
 create table vitess_acl_admin(key1 bigint default 0, key2 bigint default null, primary key(key1));
 create table vitess_acl_unmatched(key1 bigint default 0, key2 bigint default null, primary key(key1));
-create table vitess_acl_all_user_read_only(key1 bigint default 0, key2 bigint default null, primary key(key1));`
+create table vitess_acl_all_user_read_only(key1 bigint default 0, key2 bigint default null, primary key(key1));
+create table maxrows_tbl(id bigint, col bigint, primary key(id));`
 
 var tableACLConfig = `{
   "table_groups": [
@@ -315,7 +316,7 @@ var tableACLConfig = `{
     },
     {
       "name": "vitess_healthstream",
-      "table_names_or_prefixes": ["vitess_sc1", "vitess_sc2", "_vt_HOLD_6ace8bcef73211ea87e9f875a4d24e90_20200915120410"],
+      "table_names_or_prefixes": ["vitess_sc1", "vitess_sc2", "_vt_hld_6ace8bcef73211ea87e9f875a4d24e90_20200915120410_"],
       "readers": ["dev"],
       "writers": ["dev"],
       "admins": ["dev"]
@@ -344,6 +345,13 @@ var tableACLConfig = `{
     {
       "name": "vitess_twopc",
       "table_names_or_prefixes": ["dt_state", "redo_state"],
+      "readers": ["dev"],
+      "writers": ["dev"],
+      "admins": ["dev"]
+    },
+    {
+      "name": "vitess_maxrows",
+      "table_names_or_prefixes": ["maxrows_tbl"],
       "readers": ["dev"],
       "writers": ["dev"],
       "admins": ["dev"]

@@ -32,7 +32,7 @@ import (
 )
 
 func TestHashCodes(t *testing.T) {
-	var cases = []struct {
+	cases := []struct {
 		static, dynamic sqltypes.Value
 		equal           bool
 		err             error
@@ -94,6 +94,27 @@ func TestHashCodesRandom(t *testing.T) {
 	t.Logf("tested %d values, with %d equalities found\n", tested, equal)
 }
 
+// TestEnumSetHashing exercises hashing for ENUM and SET values. We intentionally
+// pass a limited EnumSetValues list to simulate a vschema that doesn't include
+// all possible values. When hashing, known values should hash based on their
+// ordinal/bitset, while unknown values fall back to hashing their raw string
+// under the binary collation. We assert that known and unknown hashes differ.
+func TestEnumSetHashing(t *testing.T) {
+	vals := EnumSetValues{"a", "b"}
+	// ENUM hashing: known vs unknown
+	hA, err := NullsafeHashcode(sqltypes.MakeTrusted(sqltypes.Enum, []byte("a")), collations.CollationBinaryID, sqltypes.Enum, 0, &vals)
+	require.NoError(t, err)
+	hC, err := NullsafeHashcode(sqltypes.MakeTrusted(sqltypes.Enum, []byte("c")), collations.CollationBinaryID, sqltypes.Enum, 0, &vals)
+	require.NoError(t, err)
+	assert.NotEqual(t, hA, hC)
+	// SET hashing: known vs unknown
+	hSetA, err := NullsafeHashcode(sqltypes.MakeTrusted(sqltypes.Set, []byte("a")), collations.CollationBinaryID, sqltypes.Set, 0, &vals)
+	require.NoError(t, err)
+	hSetC, err := NullsafeHashcode(sqltypes.MakeTrusted(sqltypes.Set, []byte("c")), collations.CollationBinaryID, sqltypes.Set, 0, &vals)
+	require.NoError(t, err)
+	assert.NotEqual(t, hSetA, hSetC)
+}
+
 type equality bool
 
 func (e equality) Operator() string {
@@ -111,7 +132,7 @@ func (e equality) String() string {
 }
 
 func TestHashCodes128(t *testing.T) {
-	var cases = []struct {
+	cases := []struct {
 		static, dynamic sqltypes.Value
 		equal           bool
 		err             error

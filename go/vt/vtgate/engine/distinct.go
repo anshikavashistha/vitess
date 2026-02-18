@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 
 	"vitess.io/vitess/go/mysql/collations"
@@ -156,21 +157,6 @@ func (d *Distinct) TryStreamExecute(ctx context.Context, vcursor VCursor, bindVa
 	return err
 }
 
-// RouteType implements the Primitive interface
-func (d *Distinct) RouteType() string {
-	return d.Source.RouteType()
-}
-
-// GetKeyspaceName implements the Primitive interface
-func (d *Distinct) GetKeyspaceName() string {
-	return d.Source.GetKeyspaceName()
-}
-
-// GetTableName implements the Primitive interface
-func (d *Distinct) GetTableName() string {
-	return d.Source.GetTableName()
-}
-
 // GetFields implements the Primitive interface
 func (d *Distinct) GetFields(ctx context.Context, vcursor VCursor, bindVars map[string]*querypb.BindVariable) (*sqltypes.Result, error) {
 	return d.Source.GetFields(ctx, vcursor, bindVars)
@@ -224,7 +210,7 @@ func (cc CheckCol) String() string {
 
 	var column string
 	if cc.WsCol == nil {
-		column = fmt.Sprintf("%d", cc.Col)
+		column = strconv.Itoa(cc.Col)
 	} else {
 		column = fmt.Sprintf("(%d:%d)", cc.Col, *cc.WsCol)
 	}

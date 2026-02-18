@@ -19,7 +19,9 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -95,7 +97,7 @@ func (mz *materializer) getWorkflowSubType() (binlogdatapb.VReplicationWorkflowS
 	switch {
 	case mz.isPartial && mz.ms.AtomicCopy:
 		return binlogdatapb.VReplicationWorkflowSubType_None,
-			fmt.Errorf("both atomic copy and partial mode cannot be specified for the same workflow")
+			errors.New("both atomic copy and partial mode cannot be specified for the same workflow")
 	case mz.isPartial:
 		return binlogdatapb.VReplicationWorkflowSubType_Partial, nil
 	case mz.ms.AtomicCopy:
@@ -156,15 +158,12 @@ func (mz *materializer) createWorkflowStreams(req *tabletmanagerdatapb.CreateVRe
 		// shard have equal key ranges. This can be done, for example, when doing
 		// shard by shard migrations -- migrating a single shard at a time between
 		// sharded source and sharded target keyspaces.
-		streamKeyRangesEqual := false
-		if len(sourceShards) == 1 && key.KeyRangeEqual(sourceShards[0].KeyRange, target.KeyRange) {
-			streamKeyRangesEqual = true
-		}
+		streamKeyRangesEqual := len(sourceShards) == 1 && key.KeyRangeEqual(sourceShards[0].KeyRange, target.KeyRange)
 
 		// Each tablet needs its own copy of the request as it will have a unique
 		// BinlogSource.
 		tabletReq := req.CloneVT()
-		tabletReq.BinlogSource, err = mz.generateBinlogSources(mz.ctx, target, sourceShards, streamKeyRangesEqual)
+		tabletReq.BinlogSource, err = mz.generateBinlogSources(target, sourceShards, streamKeyRangesEqual)
 		if err != nil {
 			return err
 		}
@@ -178,7 +177,7 @@ func (mz *materializer) getTenantClause() (*sqlparser.Expr, error) {
 	return getTenantClause(mz.ms.WorkflowOptions, mz.targetVSchema, mz.env.Parser())
 }
 
-func (mz *materializer) generateBinlogSources(ctx context.Context, targetShard *topo.ShardInfo, sourceShards []*topo.ShardInfo, keyRangesEqual bool) ([]*binlogdatapb.BinlogSource, error) {
+func (mz *materializer) generateBinlogSources(targetShard *topo.ShardInfo, sourceShards []*topo.ShardInfo, keyRangesEqual bool) ([]*binlogdatapb.BinlogSource, error) {
 	blses := make([]*binlogdatapb.BinlogSource, 0, len(mz.sourceShards))
 	for _, sourceShard := range sourceShards {
 		bls := &binlogdatapb.BinlogSource{
@@ -202,69 +201,76 @@ func (mz *materializer) generateBinlogSources(ctx context.Context, targetShard *
 		}
 
 		for _, ts := range mz.ms.TableSettings {
-			rule := &binlogdatapb.Rule{
-				Match: ts.TargetTable,
-			}
-
-			if ts.SourceExpression == "" {
-				bls.Filter.Rules = append(bls.Filter.Rules, rule)
-				continue
-			}
-
-			// Validate non-empty query.
-			stmt, err := mz.env.Parser().Parse(ts.SourceExpression)
+			rule, err := mz.generateRule(ts, targetShard, tenantClause, keyRangesEqual)
 			if err != nil {
 				return nil, err
 			}
-			sel, ok := stmt.(*sqlparser.Select)
-			if !ok {
-				return nil, fmt.Errorf("unrecognized statement: %s", ts.SourceExpression)
-			}
-			if !keyRangesEqual && mz.targetVSchema.Keyspace.Sharded && mz.targetVSchema.Tables[ts.TargetTable].Type != vindexes.TypeReference {
-				cv, err := vindexes.FindBestColVindex(mz.targetVSchema.Tables[ts.TargetTable])
-				if err != nil {
-					return nil, err
-				}
-				mappedCols := make([]*sqlparser.ColName, 0, len(cv.Columns))
-				for _, col := range cv.Columns {
-					colName, err := matchColInSelect(col, sel)
-					if err != nil {
-						return nil, err
-					}
-					mappedCols = append(mappedCols, colName)
-				}
-				subExprs := make([]sqlparser.Expr, 0, len(mappedCols)+2)
-				for _, mappedCol := range mappedCols {
-					subExprs = append(subExprs, mappedCol)
-				}
-				var vindexName string
-				if mz.workflowType == binlogdatapb.VReplicationWorkflowType_Migrate {
-					// For a Migrate, if the TargetKeyspace name is different from the SourceKeyspace name, we need to use the
-					// SourceKeyspace name to determine the vindex since the TargetKeyspace name is not known to the source.
-					// Note: it is expected that the source and target keyspaces have the same vindex name and data type.
-					keyspace := mz.ms.TargetKeyspace
-					if mz.ms.ExternalCluster != "" {
-						keyspace = mz.ms.SourceKeyspace
-					}
-					vindexName = fmt.Sprintf("%s.%s", keyspace, cv.Name)
-				} else {
-					vindexName = fmt.Sprintf("%s.%s", mz.ms.TargetKeyspace, cv.Name)
-				}
-
-				subExprs = append(subExprs, sqlparser.NewStrLiteral(vindexName))
-				subExprs = append(subExprs, sqlparser.NewStrLiteral(key.KeyRangeString(targetShard.KeyRange)))
-				inKeyRange := sqlparser.NewFuncExpr("in_keyrange", subExprs...)
-				addFilter(sel, inKeyRange)
-			}
-			if tenantClause != nil {
-				addFilter(sel, *tenantClause)
-			}
-			rule.Filter = sqlparser.String(sel)
 			bls.Filter.Rules = append(bls.Filter.Rules, rule)
 		}
 		blses = append(blses, bls)
 	}
 	return blses, nil
+}
+
+func (mz *materializer) generateRule(ts *vtctldatapb.TableMaterializeSettings, targetShard *topo.ShardInfo, tenantClause *sqlparser.Expr, keyRangesEqual bool) (*binlogdatapb.Rule, error) {
+	rule := &binlogdatapb.Rule{
+		Match: ts.TargetTable,
+	}
+
+	if ts.SourceExpression == "" {
+		return rule, nil
+	}
+
+	// Validate non-empty query.
+	stmt, err := mz.env.Parser().Parse(ts.SourceExpression)
+	if err != nil {
+		return nil, err
+	}
+	sel, ok := stmt.(*sqlparser.Select)
+	if !ok {
+		return nil, fmt.Errorf("unrecognized statement: %s", ts.SourceExpression)
+	}
+	if !keyRangesEqual && mz.targetVSchema.Keyspace.Sharded && mz.targetVSchema.Tables[ts.TargetTable].Type != vindexes.TypeReference {
+		cv, err := vindexes.FindBestColVindex(mz.targetVSchema.Tables[ts.TargetTable])
+		if err != nil {
+			return nil, err
+		}
+		mappedCols := make([]*sqlparser.ColName, 0, len(cv.Columns))
+		for _, col := range cv.Columns {
+			colName, err := matchColInSelect(col, sel)
+			if err != nil {
+				return nil, err
+			}
+			mappedCols = append(mappedCols, colName)
+		}
+		subExprs := make([]sqlparser.Expr, 0, len(mappedCols)+2)
+		for _, mappedCol := range mappedCols {
+			subExprs = append(subExprs, mappedCol)
+		}
+		var vindexName string
+		if mz.workflowType == binlogdatapb.VReplicationWorkflowType_Migrate {
+			// For a Migrate, if the TargetKeyspace name is different from the SourceKeyspace name, we need to use the
+			// SourceKeyspace name to determine the vindex since the TargetKeyspace name is not known to the source.
+			// Note: it is expected that the source and target keyspaces have the same vindex name and data type.
+			keyspace := mz.ms.TargetKeyspace
+			if mz.ms.ExternalCluster != "" {
+				keyspace = mz.ms.SourceKeyspace
+			}
+			vindexName = fmt.Sprintf("%s.%s", keyspace, cv.Name)
+		} else {
+			vindexName = fmt.Sprintf("%s.%s", mz.ms.TargetKeyspace, cv.Name)
+		}
+
+		subExprs = append(subExprs, sqlparser.NewStrLiteral(vindexName))
+		subExprs = append(subExprs, sqlparser.NewStrLiteral(key.KeyRangeString(targetShard.KeyRange)))
+		inKeyRange := sqlparser.NewFuncExpr("in_keyrange", subExprs...)
+		addFilter(sel, inKeyRange)
+	}
+	if tenantClause != nil {
+		addFilter(sel, *tenantClause)
+	}
+	rule.Filter = sqlparser.String(sel)
+	return rule, nil
 }
 
 func (mz *materializer) deploySchema() error {
@@ -340,7 +346,7 @@ func (mz *materializer) deploySchema() error {
 			}
 			mu.Unlock()
 			if err != nil {
-				log.Errorf("Error getting DDLs of source tables: %s", err.Error())
+				log.Error("Error getting DDLs of source tables: " + err.Error())
 				return err
 			}
 
@@ -355,7 +361,6 @@ func (mz *materializer) deploySchema() error {
 					}
 					if sourceTableName.Name.String() != ts.TargetTable {
 						return fmt.Errorf("source and target table names must match for copying schema: %v vs %v", sqlparser.String(sourceTableName), ts.TargetTable)
-
 					}
 				}
 
@@ -442,10 +447,10 @@ func (mz *materializer) deploySchema() error {
 				env := schemadiff.NewEnv(mz.env, mz.env.CollationEnv().DefaultConnectionCharset())
 				schema, err := schemadiff.NewSchemaFromQueries(env, applyDDLs)
 				if err != nil {
-					log.Error(vterrors.Wrapf(err, "AtomicCopy: failed to normalize schema via schemadiff"))
+					log.Error(fmt.Sprint(vterrors.Wrapf(err, "AtomicCopy: failed to normalize schema via schemadiff")))
 				} else {
 					applyDDLs = schema.ToQueries()
-					log.Infof("AtomicCopy used, and schema was normalized via schemadiff. %v queries normalized", len(applyDDLs))
+					log.Info(fmt.Sprintf("AtomicCopy used, and schema was normalized via schemadiff. %v queries normalized", len(applyDDLs)))
 				}
 			}
 			sql := strings.Join(applyDDLs, ";\n")
@@ -502,11 +507,8 @@ func (mz *materializer) buildMaterializer() error {
 		isPartial = true
 		var sourceShards2 []*topo.ShardInfo
 		for _, shard := range sourceShards {
-			for _, shard2 := range ms.SourceShards {
-				if shard.ShardName() == shard2 {
-					sourceShards2 = append(sourceShards2, shard)
-					break
-				}
+			if slices.Contains(ms.SourceShards, shard.ShardName()) {
+				sourceShards2 = append(sourceShards2, shard)
 			}
 		}
 		sourceShards = sourceShards2
@@ -534,11 +536,8 @@ func (mz *materializer) buildMaterializer() error {
 	if len(specifiedTargetShards) > 0 {
 		var targetShards2 []*topo.ShardInfo
 		for _, shard := range targetShards {
-			for _, shard2 := range specifiedTargetShards {
-				if shard.ShardName() == shard2 {
-					targetShards2 = append(targetShards2, shard)
-					break
-				}
+			if slices.Contains(specifiedTargetShards, shard.ShardName()) {
+				targetShards2 = append(targetShards2, shard)
 			}
 		}
 		targetShards = targetShards2
@@ -797,4 +796,42 @@ func (mz *materializer) IsMultiTenantMigration() bool {
 		return true
 	}
 	return false
+}
+
+// Add tables to _vt.copy_state table.
+func (mz *materializer) insertTablesInCopyStateTable(ctx context.Context, streamsByTargetShard map[string][]*tabletmanagerdatapb.ReadVReplicationWorkflowResponse_Stream) error {
+	var mu sync.Mutex
+	return forAllShards(mz.targetShards, func(si *topo.ShardInfo) error {
+		tablet, err := mz.ts.GetTablet(ctx, si.PrimaryAlias)
+		if err != nil {
+			return err
+		}
+
+		var streams []*tabletmanagerdatapb.ReadVReplicationWorkflowResponse_Stream
+		func() {
+			mu.Lock()
+			defer mu.Unlock()
+			streams = streamsByTargetShard[tablet.Shard]
+		}()
+		if len(streams) == 0 {
+			return vterrors.Errorf(vtrpcpb.Code_INTERNAL, "failed to read workflow %s on shard %s/%s", mz.ms.Workflow, tablet.Keyspace, tablet.Shard)
+		}
+
+		var buf strings.Builder
+		buf.WriteString("insert into _vt.copy_state(vrepl_id, table_name) values ")
+		prefix := ""
+		for _, stream := range streams {
+			for _, ts := range mz.ms.TableSettings {
+				fmt.Fprintf(&buf, "%s(%d, %s)", prefix, stream.Id, encodeString(ts.TargetTable))
+				prefix = ", "
+			}
+		}
+		_, err = mz.tmc.ExecuteFetchAsAllPrivs(ctx, tablet.Tablet, &tabletmanagerdatapb.ExecuteFetchAsAllPrivsRequest{
+			Query: []byte(buf.String()),
+		})
+		if err != nil {
+			return vterrors.Wrapf(err, "failed to insert tables copy state for workflow %s on shard %s/%s", mz.ms.Workflow, tablet.Keyspace, tablet.Shard)
+		}
+		return nil
+	})
 }

@@ -18,6 +18,7 @@ package sqltypes
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 
@@ -62,6 +63,15 @@ type ResultStream interface {
 	// Recv returns the next result on the stream.
 	// It will return io.EOF if the stream ended.
 	Recv() (*Result, error)
+}
+
+// MultiResultStream is an interface for receiving multiple Results. It is used for
+// RPC interfaces that send multiple responses.
+type MultiResultStream interface {
+	// Recv returns the next result on the stream.
+	// It will return io.EOF if the stream ended.
+	// The boolean tells if a new result has started.
+	Recv() (res *Result, newRes bool, err error)
 }
 
 // Repair fixes the type info in the rows
@@ -211,12 +221,12 @@ func (result *Result) Equal(other *Result) bool {
 
 // ResultsEqual compares two arrays of Result.
 // reflect.DeepEqual shouldn't be used because of the protos.
-func ResultsEqual(r1, r2 []Result) bool {
+func ResultsEqual(r1, r2 []*Result) bool {
 	if len(r1) != len(r2) {
 		return false
 	}
 	for i, r := range r1 {
-		if !r.Equal(&r2[i]) {
+		if !r.Equal(r2[i]) {
 			return false
 		}
 	}
@@ -273,9 +283,9 @@ func saveRowsAnalysis(r Result, allRows map[string]int, totalRows *int, incremen
 
 func hashCodeForRow(val []Value) string {
 	h := sha256.New()
-	h.Write([]byte(fmt.Sprintf("%v", val)))
+	fmt.Fprintf(h, "%v", val)
 
-	return fmt.Sprintf("%x", h.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // MakeRowTrusted converts a *querypb.Row to []Value based on the types

@@ -36,6 +36,10 @@ import (
 // LoadTable creates a Table from the schema info in the database.
 func LoadTable(conn *connpool.PooledConn, databaseName, tableName, tableType string, comment string, collationEnv *collations.Environment) (*Table, error) {
 	ta := NewTable(tableName, NoType)
+	if strings.Contains(tableType, tmutils.TableView) {
+		ta.Type = View
+		return ta, nil
+	}
 	sqlTableName := sqlparser.String(ta.Name)
 	if err := fetchColumns(ta, conn, databaseName, sqlTableName); err != nil {
 		return nil, err
@@ -49,8 +53,6 @@ func LoadTable(conn *connpool.PooledConn, databaseName, tableName, tableType str
 			return nil, err
 		}
 		ta.Type = Message
-	case strings.Contains(tableType, tmutils.TableView):
-		ta.Type = View
 	}
 	return ta, nil
 }
@@ -72,8 +74,8 @@ func loadMessageInfo(ta *Table, comment string, collationEnv *collations.Environ
 	ta.MessageInfo = &MessageInfo{}
 	// Extract keyvalues.
 	keyvals := make(map[string]string)
-	inputs := strings.Split(comment, ",")
-	for _, input := range inputs {
+	inputs := strings.SplitSeq(comment, ",")
+	for input := range inputs {
 		kv := strings.Split(input, "=")
 		if len(kv) != 2 {
 			continue

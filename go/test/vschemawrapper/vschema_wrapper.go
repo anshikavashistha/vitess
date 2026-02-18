@@ -50,7 +50,7 @@ type VSchemaWrapper struct {
 	V                     *vindexes.VSchema
 	Keyspace              *vindexes.Keyspace
 	TabletType_           topodatapb.TabletType
-	Dest                  key.Destination
+	Dest                  key.ShardDestination
 	SysVarEnabled         bool
 	ForeignKeyChecksState *bool
 	Version               plancontext.PlannerVersion
@@ -69,7 +69,7 @@ func NewVschemaWrapper(
 		Collation:         env.CollationEnv().DefaultConnectionCharset(),
 		DefaultTabletType: topodatapb.TabletType_PRIMARY,
 		SetVarEnabled:     true,
-	})
+	}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -109,16 +109,12 @@ func (vw *VSchemaWrapper) GetPrepareData(stmtName string) *vtgatepb.PrepareData 
 	return nil
 }
 
-func (vw *VSchemaWrapper) PlanPrepareStatement(ctx context.Context, query string) (*engine.Plan, sqlparser.Statement, error) {
+func (vw *VSchemaWrapper) PlanPrepareStatement(ctx context.Context, query string) (*engine.Plan, error) {
 	plan, err := vw.TestBuilder(query, vw, vw.CurrentDb())
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	stmt, _, err := vw.Env.Parser().Parse2(query)
-	if err != nil {
-		return nil, nil, err
-	}
-	return plan, stmt, nil
+	return plan, nil
 }
 
 func (vw *VSchemaWrapper) ClearPrepareData(string) {}
@@ -227,34 +223,20 @@ func (vw *VSchemaWrapper) SysVarSetEnabled() bool {
 	return vw.SysVarEnabled
 }
 
-func (vw *VSchemaWrapper) TargetDestination(qualifier string) (key.Destination, *vindexes.Keyspace, topodatapb.TabletType, error) {
-	var keyspaceName string
-	if vw.Keyspace != nil {
-		keyspaceName = vw.Keyspace.Name
-	}
-	if vw.Dest == nil && qualifier != "" {
-		keyspaceName = qualifier
-	}
-	if keyspaceName == "" {
-		return nil, nil, 0, vterrors.VT03007()
-	}
-	keyspace := vw.V.Keyspaces[keyspaceName]
-	if keyspace == nil {
-		return nil, nil, 0, vterrors.VT05003(keyspaceName)
-	}
-	return vw.Dest, keyspace.Keyspace, vw.TabletType_, nil
+func (vw *VSchemaWrapper) TargetDestination(qualifier string) (key.ShardDestination, *vindexes.Keyspace, topodatapb.TabletType, error) {
+	return vw.Vcursor.TargetDestination(qualifier)
 }
 
 func (vw *VSchemaWrapper) TabletType() topodatapb.TabletType {
 	return vw.TabletType_
 }
 
-func (vw *VSchemaWrapper) Destination() key.Destination {
+func (vw *VSchemaWrapper) ShardDestination() key.ShardDestination {
 	return vw.Dest
 }
 
-func (vw *VSchemaWrapper) FindTable(tab sqlparser.TableName) (*vindexes.BaseTable, string, topodatapb.TabletType, key.Destination, error) {
-	destKeyspace, destTabletType, destTarget, err := topoproto.ParseDestination(tab.Qualifier.String(), topodatapb.TabletType_PRIMARY)
+func (vw *VSchemaWrapper) FindTable(tab sqlparser.TableName) (*vindexes.BaseTable, string, topodatapb.TabletType, key.ShardDestination, error) {
+	destKeyspace, destTabletType, destTarget, _, err := topoproto.ParseDestination(tab.Qualifier.String(), topodatapb.TabletType_PRIMARY)
 	if err != nil {
 		return nil, destKeyspace, destTabletType, destTarget, err
 	}
@@ -265,16 +247,16 @@ func (vw *VSchemaWrapper) FindTable(tab sqlparser.TableName) (*vindexes.BaseTabl
 	return table, destKeyspace, destTabletType, destTarget, nil
 }
 
-func (vw *VSchemaWrapper) FindView(tab sqlparser.TableName) sqlparser.TableStatement {
-	destKeyspace, _, _, err := topoproto.ParseDestination(tab.Qualifier.String(), topodatapb.TabletType_PRIMARY)
+func (vw *VSchemaWrapper) FindView(tab sqlparser.TableName) (sqlparser.TableStatement, *sqlparser.TableName) {
+	destKeyspace, _, _, _, err := topoproto.ParseDestination(tab.Qualifier.String(), topodatapb.TabletType_PRIMARY)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	return vw.V.FindView(destKeyspace, tab.Name.String())
+	return vw.V.FindView(destKeyspace, tab.Name.String()), nil
 }
 
 func (vw *VSchemaWrapper) FindViewTarget(name sqlparser.TableName) (*vindexes.Keyspace, error) {
-	destKeyspace, _, _, err := topoproto.ParseDestination(name.Qualifier.String(), topodatapb.TabletType_PRIMARY)
+	destKeyspace, _, _, _, err := topoproto.ParseDestination(name.Qualifier.String(), topodatapb.TabletType_PRIMARY)
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +266,7 @@ func (vw *VSchemaWrapper) FindViewTarget(name sqlparser.TableName) (*vindexes.Ke
 	return nil, nil
 }
 
-func (vw *VSchemaWrapper) FindTableOrVindex(tab sqlparser.TableName) (*vindexes.BaseTable, vindexes.Vindex, string, topodatapb.TabletType, key.Destination, error) {
+func (vw *VSchemaWrapper) FindTableOrVindex(tab sqlparser.TableName) (*vindexes.BaseTable, vindexes.Vindex, string, topodatapb.TabletType, key.ShardDestination, error) {
 	return vw.Vcursor.FindTableOrVindex(tab)
 }
 
@@ -331,6 +313,10 @@ func (vw *VSchemaWrapper) ErrorIfShardedF(keyspace *vindexes.Keyspace, _, errFmt
 	return nil
 }
 
+func (vw *VSchemaWrapper) GetBindVars() map[string]*querypb.BindVariable {
+	return nil
+}
+
 func (vw *VSchemaWrapper) CurrentDb() string {
 	ksName := ""
 	if vw.Keyspace != nil {
@@ -350,7 +336,7 @@ func (vw *VSchemaWrapper) IsViewsEnabled() bool {
 // FindMirrorRule finds the mirror rule for the requested keyspace, table
 // name, and the tablet type in the VSchema.
 func (vw *VSchemaWrapper) FindMirrorRule(tab sqlparser.TableName) (*vindexes.MirrorRule, error) {
-	destKeyspace, destTabletType, _, err := topoproto.ParseDestination(tab.Qualifier.String(), topodatapb.TabletType_PRIMARY)
+	destKeyspace, destTabletType, _, _, err := topoproto.ParseDestination(tab.Qualifier.String(), topodatapb.TabletType_PRIMARY)
 	if err != nil {
 		return nil, err
 	}

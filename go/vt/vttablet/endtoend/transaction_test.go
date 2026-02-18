@@ -201,7 +201,7 @@ func TestAutoCommit(t *testing.T) {
 func TestForUpdate(t *testing.T) {
 	for _, mode := range []string{"for update", "lock in share mode"} {
 		client := framework.NewClient()
-		query := fmt.Sprintf("select * from vitess_test where intval=2 %s", mode)
+		query := "select * from vitess_test where intval=2 " + mode
 		_, err := client.Execute(query, nil)
 		require.NoError(t, err)
 
@@ -298,7 +298,7 @@ func TestShutdownGracePeriod(t *testing.T) {
 	}()
 
 	started := false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		queries := framework.LiveQueryz()
 		if len(queries) == 1 {
 			started = true
@@ -323,7 +323,7 @@ func TestShutdownGracePeriod(t *testing.T) {
 	}()
 
 	started = false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		queries := framework.LiveQueryz()
 		if len(queries) == 1 {
 			started = true
@@ -350,7 +350,7 @@ func TestShutdownGracePeriodWithStreamExecute(t *testing.T) {
 	}()
 
 	started := false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		queries := framework.LiveQueryz()
 		if len(queries) == 1 {
 			started = true
@@ -375,7 +375,7 @@ func TestShutdownGracePeriodWithStreamExecute(t *testing.T) {
 	}()
 
 	started = false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		queries := framework.LiveQueryz()
 		if len(queries) == 1 {
 			started = true
@@ -402,7 +402,7 @@ func TestShutdownGracePeriodWithReserveExecute(t *testing.T) {
 	}()
 
 	started := false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		queries := framework.LiveQueryz()
 		if len(queries) == 1 {
 			started = true
@@ -427,7 +427,7 @@ func TestShutdownGracePeriodWithReserveExecute(t *testing.T) {
 	}()
 
 	started = false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		queries := framework.LiveQueryz()
 		if len(queries) == 1 {
 			started = true
@@ -610,6 +610,7 @@ func (ac *AsyncChecker) shouldNotify(timeout time.Duration, message string) {
 		ac.t.Error(message)
 	}
 }
+
 func (ac *AsyncChecker) shouldNotNotify(timeout time.Duration, message string) {
 	select {
 	case <-ac.ch:
@@ -632,8 +633,7 @@ func TestTransactionWatcherSignal(t *testing.T) {
 	require.NoError(t, err)
 
 	ch := newAsyncChecker(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() {
 		err := client.StreamHealthWithContext(ctx, func(shr *querypb.StreamHealthResponse) error {
 			if shr.RealtimeStats.TxUnresolved {
@@ -646,7 +646,8 @@ func TestTransactionWatcherSignal(t *testing.T) {
 
 	err = client.CreateTransaction("aa", []*querypb.Target{
 		{Keyspace: "test1", Shard: "0"},
-		{Keyspace: "test2", Shard: "1"}})
+		{Keyspace: "test2", Shard: "1"},
+	})
 	require.NoError(t, err)
 
 	// wait for unresolved transaction signal
@@ -844,5 +845,82 @@ func TestUnresolvedTransactionsOrdering(t *testing.T) {
 		assert.Equal(t, want[i].Dtid, transaction.Dtid)
 		assert.Equal(t, want[i].State, transaction.State)
 		assert.Equal(t, want[i].Participants, transaction.Participants)
+	}
+}
+
+// TestSkipUserMetrics tests the SkipUserMetrics flag in the config that disables user label in the metrics.
+func TestSkipUserMetrics(t *testing.T) {
+	client := framework.NewClient()
+	query := "select * from vitess_test"
+
+	runQueries := func() {
+		// non-tx execute
+		_, err := client.Execute(query, nil)
+		require.NoError(t, err)
+
+		// tx execute
+		_, err = client.BeginExecute(query, nil, nil)
+		require.NoError(t, err)
+		require.NoError(t, client.Commit())
+	}
+
+	// Initial test with user metrics enabled
+	vstart := framework.DebugVars()
+	runQueries()
+
+	expectedDiffs := []struct {
+		tag  string
+		diff int
+	}{{ // not dependent on user
+		tag: "Transactions/TotalCount", diff: 1,
+	}, { // not dependent on user
+		tag: "Transactions/Histograms/commit/Count", diff: 1,
+	}, { // dependent on user
+		tag: "TableACLAllowed/vitess_test.vitess_test.Select.dev", diff: 2,
+	}, { // user metric enabled so this should be zero.
+		tag: "TableACLAllowed/vitess_test.vitess_test.Select.UserLabelDisabled", diff: 0,
+	}, { // dependent on user
+		tag: "UserTableQueryCount/vitess_test.dev.Execute", diff: 2,
+	}, { // user metric enabled so this should be zero.
+		tag: "UserTableQueryCount/vitess_test.UserLabelDisabled.Execute", diff: 0,
+	}, { // dependent on user
+		tag: "UserTransactionCount/dev.commit", diff: 1,
+	}}
+	vend := framework.DebugVars()
+	for _, expected := range expectedDiffs {
+		compareIntDiff(t, vend, expected.tag, vstart, expected.diff)
+	}
+
+	// Enable SkipUserMetrics and re-run tests
+	framework.Server.Config().SkipUserMetrics = true
+	defer func() {
+		framework.Server.Config().SkipUserMetrics = false
+	}()
+	vstart = framework.DebugVars()
+	runQueries()
+
+	expectedDiffs = []struct {
+		tag  string
+		diff int
+	}{{ // not dependent on user
+		tag: "Transactions/TotalCount", diff: 1,
+	}, { // not dependent on user
+		tag: "Transactions/Histograms/commit/Count", diff: 1,
+	}, { // dependent on user - should be zero now
+		tag: "TableACLAllowed/vitess_test.vitess_test.Select.dev", diff: 0,
+	}, { // user metric disabled so this should be non-zero.
+		tag: "TableACLAllowed/vitess_test.vitess_test.Select.UserLabelDisabled", diff: 2,
+	}, { // dependent on user - should be zero now
+		tag: "UserTableQueryCount/vitess_test.dev.Execute", diff: 0,
+	}, { // user metric disabled so this should be non-zero.
+		tag: "UserTableQueryCount/vitess_test.UserLabelDisabled.Execute", diff: 2,
+	}, { // dependent on user
+		tag: "UserTransactionCount/dev.commit", diff: 0,
+	}, { // no need to publish this as "Transactions" histogram already captures this.
+		tag: "UserTransactionCount/UserLabelDisabled.commit", diff: 0,
+	}}
+	vend = framework.DebugVars()
+	for _, expected := range expectedDiffs {
+		compareIntDiff(t, vend, expected.tag, vstart, expected.diff)
 	}
 }

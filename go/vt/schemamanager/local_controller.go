@@ -17,13 +17,12 @@ limitations under the License.
 package schemamanager
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path"
 	"strings"
 	"time"
-
-	"context"
 
 	"vitess.io/vitess/go/vt/log"
 )
@@ -89,7 +88,7 @@ func (controller *LocalController) Open(ctx context.Context) error {
 		dirpath := path.Join(controller.schemaChangeDir, fileinfo.Name())
 		schemaChanges, err := os.ReadDir(path.Join(dirpath, "input"))
 		if err != nil {
-			log.Warningf("there is no input dir in %s", dirpath)
+			log.Warn("there is no input dir in " + dirpath)
 			continue
 		}
 		// found a schema change
@@ -149,7 +148,7 @@ func (controller *LocalController) OnReadSuccess(ctx context.Context) error {
 
 // OnReadFail is no-op
 func (controller *LocalController) OnReadFail(ctx context.Context, err error) error {
-	log.Errorf("failed to read file: %s, error: %v", controller.sqlPath, err)
+	log.Error(fmt.Sprintf("failed to read file: %s, error: %v", controller.sqlPath, err))
 	return nil
 }
 
@@ -200,7 +199,7 @@ func (controller *LocalController) writeToLogDir(ctx context.Context, result *Ex
 	}
 	defer logFile.Close()
 
-	logFile.WriteString(fmt.Sprintf("-- new file: %s\n", controller.sqlPath))
+	fmt.Fprintf(logFile, "-- new file: %s\n", controller.sqlPath)
 	for _, sql := range result.Sqls {
 		logFile.WriteString(sql)
 		logFile.WriteString(";\n")
@@ -213,10 +212,10 @@ func (controller *LocalController) writeToLogDir(ctx context.Context, result *Ex
 			rowsAffected += result.RowsAffected
 		}
 	}
-	logFile.WriteString(fmt.Sprintf("-- Rows returned: %d\n", rowsReturned))
-	logFile.WriteString(fmt.Sprintf("-- Rows affected: %d\n", rowsAffected))
+	fmt.Fprintf(logFile, "-- Rows returned: %d\n", rowsReturned)
+	fmt.Fprintf(logFile, "-- Rows affected: %d\n", rowsAffected)
 	logFile.WriteString("-- \n")
-	logFile.WriteString(fmt.Sprintf("-- ran in %fs\n", result.TotalTimeSpent.Seconds()))
+	fmt.Fprintf(logFile, "-- ran in %fs\n", result.TotalTimeSpent.Seconds())
 	logFile.WriteString("-- Execution succeeded\n")
 	return nil
 }

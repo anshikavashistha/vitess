@@ -826,7 +826,8 @@ func TestPlanBuilderFilterComparison(t *testing.T) {
 	}, {
 		name:     "less-than-with-and",
 		inFilter: "select * from t1 where id < 2 and val <= 'xyz'",
-		outFilters: []Filter{{Opcode: LessThan, ColNum: 0, Value: sqltypes.NewInt64(2)},
+		outFilters: []Filter{
+			{Opcode: LessThan, ColNum: 0, Value: sqltypes.NewInt64(2)},
 			{Opcode: LessThanEqual, ColNum: 1, Value: sqltypes.NewVarChar("xyz")},
 		},
 	}, {
@@ -849,8 +850,14 @@ func TestPlanBuilderFilterComparison(t *testing.T) {
 			{Opcode: NotBetween, ColNum: 0, Values: []sqltypes.Value{sqltypes.NewInt64(1), sqltypes.NewInt64(5)}},
 		},
 	}, {
+		name:     "is-null-operator",
+		inFilter: "select * from t1 where val is null",
+		outFilters: []Filter{
+			{Opcode: IsNull, ColNum: 1},
+		},
+	}, {
 		name:     "vindex-and-operators",
-		inFilter: "select * from t1 where in_keyrange(id, 'hash', '-80') and id = 2 and val <> 'xyz' and id in (100, 30) and id between 20 and 60",
+		inFilter: "select * from t1 where in_keyrange(id, 'hash', '-80') and id = 2 and val <> 'xyz' and id in (100, 30) and val is null and id between 20 and 60",
 		outFilters: []Filter{
 			{
 				Opcode:        VindexMatch,
@@ -867,6 +874,7 @@ func TestPlanBuilderFilterComparison(t *testing.T) {
 			{Opcode: NotEqual, ColNum: 1, Value: sqltypes.NewVarChar("xyz")},
 			{Opcode: In, ColNum: 0, Values: []sqltypes.Value{sqltypes.NewInt64(100), sqltypes.NewInt64(30)}},
 			{Opcode: GreaterThanEqual, ColNum: 0, Value: sqltypes.NewInt64(20)},
+			{Opcode: IsNull, ColNum: 1},
 			{Opcode: LessThanEqual, ColNum: 0, Value: sqltypes.NewInt64(60)},
 		},
 	}}
@@ -920,6 +928,79 @@ func TestCompare(t *testing.T) {
 			got, err := compare(tc.opcode, tc.columnValue, tc.filterValue, collations.MySQL8(), collations.CollationUtf8mb4ID)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestFindColumn confirms that the findColumn function works as expected/intended in
+// various scenarios.
+func TestFindColumn(t *testing.T) {
+	tableName := "testy"
+	testcases := []struct {
+		name        string
+		table       *Table
+		columnName  string
+		expectError string
+	}{
+		{
+			name: "happy path",
+			table: &Table{
+				Name: tableName,
+				Fields: []*querypb.Field{
+					{
+						Name: "id",
+					},
+					{
+						Name: "email",
+					},
+				},
+			},
+			columnName: "id",
+		},
+		{
+			name: "not found due to TableMap ordinal column names",
+			table: &Table{
+				Name: tableName,
+				Fields: []*querypb.Field{
+					{
+						Name: "@1",
+					},
+					{
+						Name: "@2",
+					},
+				},
+			},
+			columnName:  "id",
+			expectError: "cannot use column names in vstream filter as the current table schema for table testy is not compatible with the current event for this table in the stream",
+		},
+		{
+			name: "not found due to schema mismatch",
+			table: &Table{
+				Name: tableName,
+				Fields: []*querypb.Field{
+					{
+						Name: "id",
+					},
+					{
+						Name: "email",
+					},
+				},
+			},
+			columnName:  "wut",
+			expectError: "column wut not found in table testy",
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run("", func(t *testing.T) {
+			fields, err := findColumn(tc.table, sqlparser.NewIdentifierCI(tc.columnName))
+			if tc.expectError != "" {
+				require.Error(t, err)
+				require.EqualError(t, err, tc.expectError)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NotNil(t, fields)
 		})
 	}
 }

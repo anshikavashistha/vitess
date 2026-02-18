@@ -64,14 +64,14 @@ func TestMain(m *testing.M) {
 			SchemaSQL: SchemaSQL,
 			VSchema:   VSchema,
 		}
-		err = clusterInstance.StartKeyspace(*keyspace, []string{"-80", "80-"}, 0, false)
+		err = clusterInstance.StartKeyspace(*keyspace, []string{"-80", "80-"}, 0, false, clusterInstance.Cell)
 		if err != nil {
 			return 1
 		}
 
 		// Start vtgate
 		clusterInstance.VtGatePlannerVersion = planbuilder.Gen4
-		clusterInstance.VtGateExtraArgs = []string{"--transaction_mode", "SINGLE"}
+		clusterInstance.VtGateExtraArgs = []string{"--transaction-mode", "SINGLE"}
 		err = clusterInstance.StartVtgate()
 		if err != nil {
 			return 1
@@ -225,12 +225,50 @@ func TestNoRecordInTableNotFail(t *testing.T) {
 	utils.AssertMatches(t, conn, `select @@transaction_mode`, `[[VARCHAR("SINGLE")]]`)
 	// Need to run this test multiple times as shards are picked randomly for Impossible query.
 	// After the fix it is not random if a shard session already exists then it reuses that same shard session.
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		utils.Exec(t, conn, `begin`)
 		utils.Exec(t, conn, `INSERT INTO t1(id, txn_id) VALUES (1, "t1")`)
 		utils.Exec(t, conn, `SELECT * FROM t2 WHERE id = 1`)
 		utils.Exec(t, conn, `rollback`)
 	}
+}
+
+func TestOnlyMultiShardWriteFail(t *testing.T) {
+	conn, cleanup := setup(t)
+	defer func() {
+		cleanup()
+		conn.Close()
+	}()
+
+	// basic test to check that multi-shard transaction is not allowed.
+	t.Run("insert-select-insert fail", func(t *testing.T) {
+		utils.Exec(t, conn, `begin`)
+		utils.Exec(t, conn, `INSERT INTO t1(id, txn_id) VALUES (1, "a")`)
+		// read is ok on another shard.
+		utils.Exec(t, conn, `select * from t1 where txn_id = "b"`)
+		// write on it will fail.
+		_, err := utils.ExecAllowError(t, conn, `INSERT INTO t1(id, txn_id) VALUES (2, "b")`)
+		require.ErrorContains(t, err, "multi-db transaction attempted")
+		utils.Exec(t, conn, `rollback`)
+	})
+
+	// test with select query on different shards and one write query.
+	t.Run("select-select-insert pass", func(t *testing.T) {
+		utils.Exec(t, conn, `begin`)
+		utils.Exec(t, conn, `select * from t1 where txn_id = "a"`)
+		utils.Exec(t, conn, `select * from t1 where txn_id = "b"`)
+		utils.Exec(t, conn, `INSERT INTO t1(id, txn_id) VALUES (1, "a")`)
+		utils.Exec(t, conn, `commit`)
+	})
+
+	// test with one write query and multiple select.
+	t.Run("insert-select-select pass", func(t *testing.T) {
+		utils.Exec(t, conn, `begin`)
+		utils.Exec(t, conn, `INSERT INTO t1(id, txn_id) VALUES (2, "b")`)
+		utils.Exec(t, conn, `select * from t1 where txn_id in ("a", "b", "c")`)
+		utils.Exec(t, conn, `select * from t1 where txn_id in ("d", "e", "f")`)
+		utils.Exec(t, conn, `commit`)
+	})
 }
 
 func setup(t *testing.T) (*mysql.Conn, func()) {

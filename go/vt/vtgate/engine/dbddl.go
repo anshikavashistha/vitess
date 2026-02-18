@@ -44,7 +44,7 @@ var databaseCreatorPlugins = map[string]DBDDLPlugin{}
 // A duplicate plugin will generate a panic.
 func DBDDLRegister(name string, plugin DBDDLPlugin) {
 	if _, ok := databaseCreatorPlugins[name]; ok {
-		panic(fmt.Sprintf("%s is already registered", name))
+		panic(name + " is already registered")
 	}
 	databaseCreatorPlugins[name] = plugin
 }
@@ -78,22 +78,11 @@ func NewDBDDL(dbName string, create bool, timeout int) *DBDDL {
 	}
 }
 
-// RouteType implements the Primitive interface
-func (c *DBDDL) RouteType() string {
+func (c *DBDDL) routeType() string {
 	if c.create {
 		return "CreateDB"
 	}
 	return "DropDB"
-}
-
-// GetKeyspaceName implements the Primitive interface
-func (c *DBDDL) GetKeyspaceName() string {
-	return c.name
-}
-
-// GetTableName implements the Primitive interface
-func (c *DBDDL) GetTableName() string {
-	return ""
 }
 
 // TryExecute implements the Primitive interface
@@ -101,7 +90,7 @@ func (c *DBDDL) TryExecute(ctx context.Context, vcursor VCursor, bindVars map[st
 	name := vcursor.GetDBDDLPluginName()
 	plugin, ok := databaseCreatorPlugins[name]
 	if !ok {
-		log.Errorf("'%s' database ddl plugin is not registered. Falling back to default plugin", name)
+		log.Error(fmt.Sprintf("'%s' database ddl plugin is not registered. Falling back to default plugin", name))
 		plugin = databaseCreatorPlugins[defaultDBDDLPlugin]
 	}
 
@@ -126,7 +115,7 @@ func (c *DBDDL) createDatabase(ctx context.Context, vcursor VCursor, plugin DBDD
 	var destinations []*srvtopo.ResolvedShard
 	for {
 		// loop until we have found a valid shard
-		destinations, _, err = vcursor.ResolveDestinations(ctx, c.name, nil, []key.Destination{key.DestinationAllShards{}})
+		destinations, _, err = vcursor.ResolveDestinations(ctx, c.name, nil, []key.ShardDestination{key.DestinationAllShards{}})
 		if err == nil {
 			break
 		}
@@ -199,7 +188,7 @@ func (c *DBDDL) GetFields(context.Context, VCursor, map[string]*querypb.BindVari
 // description implements the Primitive interface
 func (c *DBDDL) description() PrimitiveDescription {
 	return PrimitiveDescription{
-		OperatorType: strings.ToUpper(c.RouteType()),
+		OperatorType: strings.ToUpper(c.routeType()),
 		Keyspace:     &vindexes.Keyspace{Name: c.name},
 	}
 }

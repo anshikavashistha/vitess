@@ -42,9 +42,11 @@ import (
 	"vitess.io/vitess/go/vt/vttablet/sandboxconn"
 )
 
-var queries = []*querypb.BoundQuery{{Sql: "query1"}}
-var twoQueries = []*querypb.BoundQuery{{Sql: "query1"}, {Sql: "query1"}}
-var threeQueries = []*querypb.BoundQuery{{Sql: "query1"}, {Sql: "query1"}, {Sql: "query1"}}
+var (
+	queries      = []*querypb.BoundQuery{{Sql: "query1"}}
+	twoQueries   = []*querypb.BoundQuery{{Sql: "query1"}, {Sql: "query1"}}
+	threeQueries = []*querypb.BoundQuery{{Sql: "query1"}, {Sql: "query1"}, {Sql: "query1"}}
+)
 
 func TestTxConnBegin(t *testing.T) {
 	ctx := utils.LeakCheckContext(t)
@@ -184,7 +186,7 @@ func TestTxConnCommitFailureAfterNonAtomicCommitMaxShards(t *testing.T) {
 		ShardSessions: []*vtgatepb.Session_ShardSession{},
 	}
 
-	for i := 0; i < 18; i++ {
+	for i := range 18 {
 		sc.ExecuteMultiShard(ctx, nil, rssm[i], queries, session, false, false, nullResultsObserver{}, false)
 		wantSession.ShardSessions = append(wantSession.ShardSessions, &vtgatepb.Session_ShardSession{
 			Target: &querypb.Target{
@@ -216,7 +218,7 @@ func TestTxConnCommitFailureAfterNonAtomicCommitMaxShards(t *testing.T) {
 	}
 
 	utils.MustMatch(t, &wantSession, session.Session, "Session")
-	for i := 0; i < 17; i++ {
+	for i := range 17 {
 		assert.EqualValues(t, 1, sbcs[i].CommitCount.Load(), fmt.Sprintf("sbc%d.CommitCount", i))
 	}
 
@@ -238,7 +240,7 @@ func TestTxConnCommitFailureBeforeNonAtomicCommitMaxShards(t *testing.T) {
 		ShardSessions: []*vtgatepb.Session_ShardSession{},
 	}
 
-	for i := 0; i < 17; i++ {
+	for i := range 17 {
 		sc.ExecuteMultiShard(ctx, nil, rssm[i], queries, session, false, false, nullResultsObserver{}, false)
 		wantSession.ShardSessions = append(wantSession.ShardSessions, &vtgatepb.Session_ShardSession{
 			Target: &querypb.Target{
@@ -270,7 +272,7 @@ func TestTxConnCommitFailureBeforeNonAtomicCommitMaxShards(t *testing.T) {
 	}
 
 	utils.MustMatch(t, &wantSession, session.Session, "Session")
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		assert.EqualValues(t, 1, sbcs[i].CommitCount.Load(), fmt.Sprintf("sbc%d.CommitCount", i))
 	}
 
@@ -1549,7 +1551,70 @@ func TestTxConnAccessModeReset(t *testing.T) {
 				tcase.f(ctx, safeSession))
 
 			// check that the access mode is reset
-			require.Nil(t, safeSession.Session.Options.TransactionAccessMode)
+			require.Nil(t, safeSession.Options.TransactionAccessMode)
+		})
+	}
+}
+
+// TestTxConnMetrics tests the `TransactionProcessed` metrics.
+func TestTxConnMetrics(t *testing.T) {
+	ctx := utils.LeakCheckContext(t)
+
+	sc, _, _, rss0, rss1, _ := newTestTxConnEnv(t, ctx, "TestTxConn")
+	session := &vtgatepb.Session{}
+
+	tcases := []struct {
+		name      string
+		queries   []*querypb.BoundQuery
+		rss       []*srvtopo.ResolvedShard
+		expMetric string
+		expVal    int
+	}{{
+		name:      "oneReadQuery",
+		queries:   []*querypb.BoundQuery{{Sql: "select 1"}},
+		rss:       rss0,
+		expMetric: "Single.ReadOnly",
+		expVal:    1,
+	}, {
+		name:      "twoReadQuery",
+		queries:   []*querypb.BoundQuery{{Sql: "select 2"}, {Sql: "select 3"}},
+		rss:       append(rss0, rss1...),
+		expMetric: "Cross.ReadOnly",
+		expVal:    1,
+	}, {
+		name:      "oneWriteQuery",
+		queries:   []*querypb.BoundQuery{{Sql: "update t set col = 1"}},
+		rss:       rss0,
+		expMetric: "Single.ReadWrite",
+		expVal:    1,
+	}, {
+		name:      "twoWriteQuery",
+		queries:   []*querypb.BoundQuery{{Sql: "update t set col = 2"}, {Sql: "update t set col = 3"}},
+		rss:       append(rss0, rss1...),
+		expMetric: "Cross.ReadWrite",
+		expVal:    1,
+	}, {
+		name:      "oneReadOneWriteQuery",
+		queries:   []*querypb.BoundQuery{{Sql: "select 4"}, {Sql: "update t set col = 4"}},
+		rss:       append(rss0, rss1...),
+		expMetric: "Cross.ReadWrite",
+		expVal:    2,
+	}}
+
+	txProcessed.ResetAll()
+	for _, tc := range tcases {
+		t.Run(tc.name, func(t *testing.T) {
+			// begin
+			safeSession := econtext.NewAutocommitSession(session)
+			err := sc.txConn.Begin(ctx, safeSession, nil)
+			require.NoError(t, err)
+			_, errors := sc.ExecuteMultiShard(ctx, nil, tc.rss, tc.queries, safeSession, false, false, nullResultsObserver{}, false)
+			require.Empty(t, errors)
+			require.NoError(t,
+				sc.txConn.Commit(ctx, safeSession))
+			txCountMap := txProcessed.Counts()
+			fmt.Printf("%v", txCountMap)
+			assert.EqualValues(t, tc.expVal, txCountMap[tc.expMetric])
 		})
 	}
 }
@@ -1571,7 +1636,7 @@ func newTestTxConnEnvNShards(t *testing.T, ctx context.Context, name string, n i
 	sc = newTestScatterConn(ctx, hc, newSandboxForCells(ctx, []string{"aa"}), "aa")
 
 	sNames := make([]string, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		sNames[i] = strconv.FormatInt(int64(i), 10)
 	}
 

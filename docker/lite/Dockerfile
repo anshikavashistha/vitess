@@ -1,18 +1,19 @@
-# Copyright 2019 The Vitess Authors.
-# 
+# Copyright 2025 The Vitess Authors.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #     http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM --platform=linux/amd64 golang:1.24.0-bookworm AS builder
+# Build the Vitess Go binaries
+FROM --platform=linux/amd64 golang:1.26.0-bookworm@sha256:eae3cdfa040d0786510a5959d36a836978724d03b34a166ba2e0e198baac9196 AS go-builder
 
 # Allows docker builds to set the BUILD_NUMBER
 ARG BUILD_NUMBER
@@ -34,22 +35,40 @@ RUN mkdir -p /vt/vtdataroot /home/vitess
 RUN chown -R vitess:vitess /vt /home/vitess
 USER vitess
 
-# Re-copy sources from working tree.
+# Copy go.mod/go.sum and install dependencies separately.
+COPY --chown=vitess:vitess go.mod go.sum /vt/src/vitess.io/vitess/
+RUN go mod download
+
+# Copy the rest of the source and build the binaries.
 COPY --chown=vitess:vitess . /vt/src/vitess.io/vitess
+RUN make install PREFIX=/vt/install NOVTADMINBUILD=1
 
-RUN make install PREFIX=/vt/install
+# Build vtadmin separately.
+FROM --platform=linux/amd64 node:25-bookworm-slim@sha256:32f45869cf02c26971de72c383d5f99cab002905ed8b515b56df925007941782 AS vtadmin-builder
 
-# Start over and build the final image.
-FROM --platform=linux/amd64 debian:bookworm-slim
+WORKDIR /vt/web/vtadmin
+
+# Copy package.json/package-lock.json and install dependencies separately.
+COPY web/vtadmin/package.json web/vtadmin/package-lock.json /vt/web/vtadmin/
+RUN npm ci
+
+# Copy the rest of the source and build the static files.
+COPY web/vtadmin/ /vt/web/vtadmin/
+RUN VITE_VTADMIN_API_ADDRESS="http://localhost:14200" \
+    VITE_ENABLE_EXPERIMENTAL_TABLET_DEBUG_VARS="true" \
+    npm run build
+
+# Build the final image with the minimum Go binaries + static files.
+FROM --platform=linux/amd64 debian:bookworm-slim@sha256:98f4b71de414932439ac6ac690d7060df1f27161073c5036a7553723881bffbe
 
 # Install locale required for mysqlsh
-RUN apt-get update && apt-get install -y locales \
+RUN apt-get update && apt-get install -y locales tar \
     && echo "en_US.UTF-8 UTF-8" > /etc/locale.gen \
     && locale-gen en_US.UTF-8
 
 # Install dependencies
 COPY docker/utils/install_dependencies.sh /vt/dist/install_dependencies.sh
-RUN /vt/dist/install_dependencies.sh mysql80
+RUN /vt/dist/install_dependencies.sh mysql84
 
 # Set up Vitess user and directory tree.
 RUN groupadd -r vitess && useradd -r -g vitess vitess
@@ -60,12 +79,13 @@ ENV VTROOT /vt
 ENV VTDATAROOT /vt/vtdataroot
 ENV PATH $VTROOT/bin:$PATH
 
-# Copy artifacts from builder layer.
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=builder --chown=vitess:vitess /vt/install /vt
-COPY --from=builder --chown=vitess:vitess /vt/src/vitess.io/vitess/web/vtadmin /vt/web/vtadmin
-COPY --from=builder --chown=vitess:vitess /vt/src/vitess.io/vitess/config/init_db.sql /vt/config/
-COPY --from=builder --chown=vitess:vitess /vt/src/vitess.io/vitess/config/mycnf /vt/config/
+# Copy artifacts from builder layers.
+COPY --from=go-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=go-builder --chown=vitess:vitess /vt/install /vt
+COPY --from=go-builder --chown=vitess:vitess /vt/src/vitess.io/vitess/web/vtadmin /vt/web/vtadmin
+COPY --from=vtadmin-builder --chown=vitess:vitess /vt/web/vtadmin/build /vt/web/vtadmin/build
+COPY --from=go-builder --chown=vitess:vitess /vt/src/vitess.io/vitess/config/init_db.sql /vt/config/
+COPY --from=go-builder --chown=vitess:vitess /vt/src/vitess.io/vitess/config/mycnf /vt/config/
 
 # Create mount point for actual data (e.g. MySQL data dir)
 VOLUME /vt/vtdataroot

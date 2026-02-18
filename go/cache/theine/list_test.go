@@ -18,7 +18,7 @@ limitations under the License.
 package theine
 
 import (
-	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -29,7 +29,7 @@ func TestList(t *testing.T) {
 	require.Equal(t, uint(5), l.capacity)
 	require.Equal(t, LIST_PROBATION, l.listType)
 	for i := range 5 {
-		evicted := l.PushFront(NewEntry(StringKey(fmt.Sprintf("%d", i)), "", 1))
+		evicted := l.PushFront(NewEntry(StringKey(strconv.Itoa(i)), "", 1))
 		require.Nil(t, evicted)
 	}
 	require.Equal(t, 5, l.len)
@@ -44,14 +44,14 @@ func TestList(t *testing.T) {
 
 	for i := range 5 {
 		entry := l.PopTail()
-		require.Equal(t, StringKey(fmt.Sprintf("%d", i+1)), entry.key)
+		require.Equal(t, StringKey(strconv.Itoa(i+1)), entry.key)
 	}
 	entry := l.PopTail()
 	require.Nil(t, entry)
 
 	var entries []*Entry[StringKey, string]
 	for i := range 5 {
-		new := NewEntry(StringKey(fmt.Sprintf("%d", i)), "", 1)
+		new := NewEntry(StringKey(strconv.Itoa(i)), "", 1)
 		evicted := l.PushFront(new)
 		entries = append(entries, new)
 		require.Nil(t, evicted)
@@ -69,7 +69,6 @@ func TestList(t *testing.T) {
 	l.Remove(entries[1])
 	require.Equal(t, "4/2/3/0", l.display())
 	require.Equal(t, "0/3/2/4", l.displayReverse())
-
 }
 
 func TestListCountCost(t *testing.T) {
@@ -77,7 +76,7 @@ func TestListCountCost(t *testing.T) {
 	require.Equal(t, uint(100), l.capacity)
 	require.Equal(t, LIST_PROBATION, l.listType)
 	for i := range 5 {
-		evicted := l.PushFront(NewEntry(StringKey(fmt.Sprintf("%d", i)), "", 20))
+		evicted := l.PushFront(NewEntry(StringKey(strconv.Itoa(i)), "", 20))
 		require.Nil(t, evicted)
 	}
 	require.Equal(t, 100, l.len)

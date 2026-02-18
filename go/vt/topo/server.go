@@ -45,7 +45,9 @@ package topo
 import (
 	"context"
 	"fmt"
+	"os"
 	"path"
+	"slices"
 	"sync"
 
 	"github.com/spf13/pflag"
@@ -54,6 +56,7 @@ import (
 	"vitess.io/vitess/go/vt/log"
 	"vitess.io/vitess/go/vt/proto/topodata"
 	"vitess.io/vitess/go/vt/servenv"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vterrors"
 )
 
@@ -180,8 +183,10 @@ var (
 		cellsToAliases: make(map[string]string),
 	}
 
-	FlagBinaries = []string{"vttablet", "vtctl", "vtctld", "vtcombo", "vtgate",
-		"vtorc", "vtbackup"}
+	FlagBinaries = []string{
+		"vttablet", "vtctl", "vtctld", "vtcombo", "vtgate",
+		"vtorc", "vtbackup",
+	}
 
 	// Default read concurrency to use in order to avoid overhwelming the topo server.
 	DefaultReadConcurrency int64 = 32
@@ -194,18 +199,19 @@ func init() {
 }
 
 func registerTopoFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&topoImplementation, "topo_implementation", topoImplementation, "the topology implementation to use")
-	fs.StringVar(&topoGlobalServerAddress, "topo_global_server_address", topoGlobalServerAddress, "the address of the global topology server")
-	fs.StringVar(&topoGlobalRoot, "topo_global_root", topoGlobalRoot, "the path of the global topology data in the global topology server")
-	fs.Int64Var(&DefaultReadConcurrency, "topo_read_concurrency", DefaultReadConcurrency, "Maximum concurrency of topo reads per global or local cell.")
+	utils.SetFlagStringVar(fs, &topoImplementation, "topo-implementation", topoImplementation, "the topology implementation to use")
+	utils.SetFlagStringVar(fs, &topoGlobalServerAddress, "topo-global-server-address", topoGlobalServerAddress, "the address of the global topology server")
+	utils.SetFlagStringVar(fs, &topoGlobalRoot, "topo-global-root", topoGlobalRoot, "the path of the global topology data in the global topology server")
+	utils.SetFlagInt64Var(fs, &DefaultReadConcurrency, "topo-read-concurrency", DefaultReadConcurrency, "Maximum concurrency of topo reads per global or local cell.")
 }
 
 // RegisterFactory registers a Factory for an implementation for a Server.
-// If an implementation with that name already exists, it log.Fatals out.
+// If an implementation with that name already exists, it exits the process.
 // Call this in the 'init' function in your topology implementation module.
 func RegisterFactory(name string, factory Factory) {
 	if factories[name] != nil {
-		log.Fatalf("Duplicate topo.Factory registration for %v", name)
+		log.Error(fmt.Sprintf("Duplicate topo.Factory registration for %v", name))
+		os.Exit(1)
 	}
 	factories[name] = factory
 }
@@ -250,17 +256,20 @@ func OpenServer(implementation, serverAddress, root string) (*Server, error) {
 }
 
 // Open returns a Server using the command line parameter flags
-// for implementation, address and root. It log.Exits out if an error occurs.
+// for implementation, address and root. It exits the process if an error occurs.
 func Open() *Server {
 	if topoGlobalServerAddress == "" {
-		log.Exitf("topo_global_server_address must be configured")
+		log.Error("topo-global-server-address must be configured")
+		os.Exit(1)
 	}
 	if topoGlobalRoot == "" {
-		log.Exit("topo_global_root must be non-empty")
+		log.Error("topo-global-root must be non-empty")
+		os.Exit(1)
 	}
 	ts, err := OpenServer(topoImplementation, topoGlobalServerAddress, topoGlobalRoot)
 	if err != nil {
-		log.Exitf("Failed to open topo server (%v,%v,%v): %v", topoImplementation, topoGlobalServerAddress, topoGlobalRoot, err)
+		log.Error(fmt.Sprintf("Failed to open topo server (%v,%v,%v): %v", topoImplementation, topoGlobalServerAddress, topoGlobalRoot, err))
+		os.Exit(1)
 	}
 	return ts
 }
@@ -336,11 +345,9 @@ func GetAliasByCell(ctx context.Context, ts *Server, cell string) string {
 		}
 
 		for alias, cellsAlias := range cellAliases {
-			for _, cellAlias := range cellsAlias.Cells {
-				if cellAlias == cell {
-					cellsAliases.cellsToAliases[cell] = alias
-					return alias
-				}
+			if slices.Contains(cellsAlias.Cells, cell) {
+				cellsAliases.cellsToAliases[cell] = alias
+				return alias
 			}
 		}
 	}

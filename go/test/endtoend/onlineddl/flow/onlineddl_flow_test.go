@@ -42,9 +42,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"math/rand/v2"
-	"net/http"
 	"os"
 	"path"
 	"runtime"
@@ -62,6 +60,7 @@ import (
 	"vitess.io/vitess/go/test/endtoend/onlineddl"
 	"vitess.io/vitess/go/test/endtoend/throttler"
 	"vitess.io/vitess/go/vt/log"
+	tabletmanagerdatapb "vitess.io/vitess/go/vt/proto/tabletmanagerdata"
 	"vitess.io/vitess/go/vt/schema"
 	throttlebase "vitess.io/vitess/go/vt/vttablet/tabletserver/throttle/base"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/throttle/throttlerapp"
@@ -109,9 +108,7 @@ var (
 	`
 )
 
-var (
-	countIterations = 5
-)
+var countIterations = 5
 
 const (
 	maxTableRows         = 4096
@@ -129,16 +126,18 @@ func TestMain(m *testing.M) {
 		defer clusterInstance.Teardown()
 
 		if _, err := os.Stat(schemaChangeDirectory); os.IsNotExist(err) {
-			_ = os.Mkdir(schemaChangeDirectory, 0700)
+			_ = os.Mkdir(schemaChangeDirectory, 0o700)
 		}
 
 		clusterInstance.VtctldExtraArgs = []string{
+			// TODO: Replace flag with dashed version in v25
 			"--schema_change_dir", schemaChangeDirectory,
 			"--schema_change_controller", "local",
 			"--schema_change_check_interval", "1s",
 		}
 
 		clusterInstance.VtTabletExtraArgs = []string{
+			// TODO: Replace flag with dashed version in v25
 			"--heartbeat_interval", "250ms",
 			"--heartbeat_on_demand_duration", "5s",
 			"--migration_check_interval", "2s",
@@ -158,7 +157,7 @@ func TestMain(m *testing.M) {
 		}
 
 		// No need for replicas in this stress test
-		if err := clusterInstance.StartKeyspace(*keyspace, []string{"1"}, 1, false); err != nil {
+		if err := clusterInstance.StartKeyspace(*keyspace, []string{"1"}, 1, false, clusterInstance.Cell); err != nil {
 			return 1, err
 		}
 
@@ -192,11 +191,10 @@ func TestMain(m *testing.M) {
 	} else {
 		os.Exit(exitcode)
 	}
-
 }
 
 func TestOnlineDDLFlow(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	require.NotNil(t, clusterInstance)
 	require.NotNil(t, primaryTablet)
@@ -238,9 +236,9 @@ func TestOnlineDDLFlow(t *testing.T) {
 					ticker := time.NewTicker(500 * time.Millisecond)
 					defer ticker.Stop()
 					for {
-						_, statusCode, err := throttlerCheck(primaryTablet.VttabletProcess, throttlerapp.OnlineDDLName)
+						resp, err := throttler.CheckThrottler(&clusterInstance.VtctldClientProcess, primaryTablet, throttlerapp.OnlineDDLName, nil)
 						assert.NoError(t, err)
-						throttleWorkload.Store(statusCode != http.StatusOK)
+						throttleWorkload.Store(resp.Check.ResponseCode != tabletmanagerdatapb.CheckThrottlerResponseCode_OK)
 						select {
 						case <-ticker.C:
 						case <-workloadCtx.Done():
@@ -280,7 +278,7 @@ func TestOnlineDDLFlow(t *testing.T) {
 				onlineddl.CheckThrottledApps(t, &vtParams, throttlerapp.OnlineDDLName, false)
 				onlineddl.ThrottleAllMigrations(t, &vtParams)
 				onlineddl.CheckThrottledApps(t, &vtParams, throttlerapp.OnlineDDLName, true)
-				waitForThrottleCheckStatus(t, throttlerapp.OnlineDDLName, primaryTablet, http.StatusExpectationFailed)
+				throttler.WaitForCheckThrottlerResult(t, &clusterInstance.VtctldClientProcess, primaryTablet, throttlerapp.OnlineDDLName, nil, tabletmanagerdatapb.CheckThrottlerResponseCode_APP_DENIED, migrationWaitTimeout)
 			})
 			t.Run("unthrottle online-ddl", func(t *testing.T) {
 				onlineddl.UnthrottleAllMigrations(t, &vtParams)
@@ -290,7 +288,7 @@ func TestOnlineDDLFlow(t *testing.T) {
 
 					t.Logf("Throttler status: %+v", status)
 				}
-				waitForThrottleCheckStatus(t, throttlerapp.OnlineDDLName, primaryTablet, http.StatusOK)
+				throttler.WaitForCheckThrottlerResult(t, &clusterInstance.VtctldClientProcess, primaryTablet, throttlerapp.OnlineDDLName, nil, tabletmanagerdatapb.CheckThrottlerResponseCode_OK, migrationWaitTimeout)
 			})
 			t.Run("apply more DML", func(t *testing.T) {
 				// Looking to run a substantial amount of DML, giving vreplication
@@ -521,7 +519,7 @@ func generateDelete(t *testing.T, conn *mysql.Conn) error {
 }
 
 func runSingleConnection(ctx context.Context, t *testing.T, sleepInterval time.Duration) {
-	log.Infof("Running single connection")
+	log.Info("Running single connection")
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.Nil(t, err)
 	defer conn.Close()
@@ -547,7 +545,7 @@ func runSingleConnection(ctx context.Context, t *testing.T, sleepInterval time.D
 		}
 		select {
 		case <-ctx.Done():
-			log.Infof("Terminating single connection")
+			log.Info("Terminating single connection")
 			return
 		case <-ticker.C:
 		}
@@ -567,96 +565,38 @@ func runMultipleConnections(ctx context.Context, t *testing.T) {
 	singleConnectionSleepIntervalNanoseconds := float64(baseSleepInterval.Nanoseconds()) * sleepModifier
 	sleepInterval := time.Duration(int64(singleConnectionSleepIntervalNanoseconds))
 
-	log.Infof("Running multiple connections: maxConcurrency=%v, sleep interval=%v", maxConcurrency, sleepInterval)
+	log.Info(fmt.Sprintf("Running multiple connections: maxConcurrency=%v, sleep interval=%v", maxConcurrency, sleepInterval))
 	var wg sync.WaitGroup
-	for i := 0; i < maxConcurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range maxConcurrency {
+		wg.Go(func() {
 			runSingleConnection(ctx, t, sleepInterval)
-		}()
+		})
 	}
 	wg.Wait()
-	log.Infof("Running multiple connections: done")
+	log.Info("Running multiple connections: done")
 }
 
 func initTable(t *testing.T) {
-	log.Infof("initTable begin")
-	defer log.Infof("initTable complete")
+	log.Info("initTable begin")
+	defer log.Info("initTable complete")
 
-	ctx := context.Background()
+	ctx := t.Context()
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.Nil(t, err)
 	defer conn.Close()
 
 	appliedDMLStart := totalAppliedDML.Load()
 
-	for i := 0; i < maxTableRows/2; i++ {
+	for range maxTableRows / 2 {
 		generateInsert(t, conn)
 	}
-	for i := 0; i < maxTableRows/4; i++ {
+	for range maxTableRows / 4 {
 		generateUpdate(t, conn)
 	}
-	for i := 0; i < maxTableRows/4; i++ {
+	for range maxTableRows / 4 {
 		generateDelete(t, conn)
 	}
 	appliedDMLEnd := totalAppliedDML.Load()
 	assert.Greater(t, appliedDMLEnd, appliedDMLStart)
 	assert.GreaterOrEqual(t, appliedDMLEnd-appliedDMLStart, int64(maxTableRows))
-}
-
-func throttleResponse(tablet *cluster.VttabletProcess, path string) (respBody string, err error) {
-	apiURL := fmt.Sprintf("http://%s:%d/%s", tablet.TabletHostname, tablet.Port, path)
-	resp, err := httpClient.Get(apiURL)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
-	respBody = string(b)
-	return respBody, err
-}
-
-func throttleApp(tablet *cluster.VttabletProcess, throttlerApp throttlerapp.Name) (string, error) {
-	return throttleResponse(tablet, fmt.Sprintf("throttler/throttle-app?app=%s&duration=1h", throttlerApp.String()))
-}
-
-func unthrottleApp(tablet *cluster.VttabletProcess, throttlerApp throttlerapp.Name) (string, error) {
-	return throttleResponse(tablet, fmt.Sprintf("throttler/unthrottle-app?app=%s", throttlerApp.String()))
-}
-
-func throttlerCheck(tablet *cluster.VttabletProcess, throttlerApp throttlerapp.Name) (respBody string, statusCode int, err error) {
-	apiURL := fmt.Sprintf("http://%s:%d/throttler/check?app=%s", tablet.TabletHostname, tablet.Port, throttlerApp.String())
-	resp, err := httpClient.Get(apiURL)
-	if err != nil {
-		return "", 0, err
-	}
-	defer resp.Body.Close()
-	statusCode = resp.StatusCode
-	b, err := io.ReadAll(resp.Body)
-	respBody = string(b)
-	return respBody, statusCode, err
-}
-
-// waitForThrottleCheckStatus waits for the tablet to return the provided HTTP code in a throttle check
-func waitForThrottleCheckStatus(t *testing.T, throttlerApp throttlerapp.Name, tablet *cluster.Vttablet, wantCode int) {
-	ctx, cancel := context.WithTimeout(context.Background(), migrationWaitTimeout)
-	defer cancel()
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-
-	for {
-		respBody, statusCode, err := throttlerCheck(tablet.VttabletProcess, throttlerApp)
-		require.NoError(t, err)
-
-		if wantCode == statusCode {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			assert.Equalf(t, wantCode, statusCode, "body: %s", respBody)
-			return
-		case <-ticker.C:
-		}
-	}
 }

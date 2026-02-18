@@ -19,23 +19,26 @@ package vtgate
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
+	"errors"
 	"os"
 	"path"
 	"strings"
 	"syscall"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"vitess.io/vitess/go/mysql"
+	"vitess.io/vitess/go/mysql/collations"
 	"vitess.io/vitess/go/mysql/replication"
+	"vitess.io/vitess/go/mysql/sqlerror"
 	"vitess.io/vitess/go/sqltypes"
 	"vitess.io/vitess/go/test/utils"
 	"vitess.io/vitess/go/trace"
 	querypb "vitess.io/vitess/go/vt/proto/query"
+	"vitess.io/vitess/go/vt/sqlparser"
 	"vitess.io/vitess/go/vt/tlstest"
 	"vitess.io/vitess/go/vt/vtenv"
 )
@@ -58,8 +61,27 @@ func (th *testHandler) ComQuery(c *mysql.Conn, q string, callback func(*sqltypes
 	return callback(&sqltypes.Result{Fields: []*querypb.Field{}, Rows: [][]sqltypes.Value{}})
 }
 
-func (th *testHandler) ComPrepare(c *mysql.Conn, q string, b map[string]*querypb.BindVariable) ([]*querypb.Field, error) {
-	return nil, nil
+func (th *testHandler) ComQueryMulti(c *mysql.Conn, sql string, callback func(qr sqltypes.QueryResponse, more bool, firstPacket bool) error) error {
+	qries, err := th.Env().Parser().SplitStatementToPieces(sql)
+	if err != nil {
+		return err
+	}
+	for i, query := range qries {
+		firstPacket := true
+		err = th.ComQuery(c, query, func(result *sqltypes.Result) error {
+			err = callback(sqltypes.QueryResponse{QueryResult: result}, i < len(qries)-1, firstPacket)
+			firstPacket = false
+			return err
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (th *testHandler) ComPrepare(*mysql.Conn, string) ([]*querypb.Field, uint16, error) {
+	return nil, 0, nil
 }
 
 func (th *testHandler) ComStmtExecute(c *mysql.Conn, prepare *mysql.PrepareData, callback func(*sqltypes.Result) error) error {
@@ -192,7 +214,7 @@ func newFromStringFail(t *testing.T) func(ctx context.Context, parentSpan string
 
 func newFromStringError(t *testing.T) func(ctx context.Context, parentSpan string, label string) (trace.Span, context.Context, error) {
 	return func(ctx context.Context, parentSpan string, label string) (trace.Span, context.Context, error) {
-		return trace.NoopSpan{}, context.Background(), fmt.Errorf("")
+		return trace.NoopSpan{}, context.Background(), errors.New("")
 	}
 }
 
@@ -276,35 +298,39 @@ func TestInitTLSConfigWithServerCA(t *testing.T) {
 }
 
 func testInitTLSConfig(t *testing.T, serverCA bool) {
-	// Create the certs.
-	ctx := utils.LeakCheckContext(t)
+	synctest.Test(t, func(t *testing.T) {
+		// Create the certs.
+		ctx := utils.LeakCheckContext(t)
 
-	root := t.TempDir()
-	tlstest.CreateCA(root)
-	tlstest.CreateCRL(root, tlstest.CA)
-	tlstest.CreateSignedCert(root, tlstest.CA, "01", "server", "server.example.com")
+		root := t.TempDir()
+		tlstest.CreateCA(root)
+		tlstest.CreateCRL(root, tlstest.CA)
+		tlstest.CreateSignedCert(root, tlstest.CA, "01", "server", "server.example.com")
 
-	serverCACert := ""
-	if serverCA {
-		serverCACert = path.Join(root, "ca-cert.pem")
-	}
+		serverCACert := ""
+		if serverCA {
+			serverCACert = path.Join(root, "ca-cert.pem")
+		}
 
-	srv := &mysqlServer{tcpListener: &mysql.Listener{}}
-	if err := initTLSConfig(ctx, srv, path.Join(root, "server-cert.pem"), path.Join(root, "server-key.pem"), path.Join(root, "ca-cert.pem"), path.Join(root, "ca-crl.pem"), serverCACert, true, tls.VersionTLS12); err != nil {
-		t.Fatalf("init tls config failure due to: +%v", err)
-	}
+		srv := &mysqlServer{tcpListener: &mysql.Listener{}}
+		if err := initTLSConfig(ctx, srv, path.Join(root, "server-cert.pem"), path.Join(root, "server-key.pem"), path.Join(root, "ca-cert.pem"), path.Join(root, "ca-crl.pem"), serverCACert, true, tls.VersionTLS12); err != nil {
+			t.Fatalf("init tls config failure due to: +%v", err)
+		}
 
-	serverConfig := srv.tcpListener.TLSConfig.Load()
-	if serverConfig == nil {
-		t.Fatalf("init tls config shouldn't create nil server config")
-	}
+		serverConfig := srv.tcpListener.TLSConfig.Load()
+		if serverConfig == nil {
+			t.Fatalf("init tls config shouldn't create nil server config")
+		}
 
-	srv.sigChan <- syscall.SIGHUP
-	time.Sleep(100 * time.Millisecond) // wait for signal handler
+		srv.sigChan <- syscall.SIGHUP
 
-	if srv.tcpListener.TLSConfig.Load() == serverConfig {
-		t.Fatalf("init tls config should have been recreated after SIGHUP")
-	}
+		// wait for signal handler
+		synctest.Wait()
+
+		if srv.tcpListener.TLSConfig.Load() == serverConfig {
+			t.Fatalf("init tls config should have been recreated after SIGHUP")
+		}
+	})
 }
 
 // TestKillMethods test the mysql plugin for kill method calls.
@@ -346,12 +372,511 @@ func TestKillMethods(t *testing.T) {
 	require.True(t, mysqlConn.IsMarkedForClose())
 }
 
+func TestComQueryMulti(t *testing.T) {
+	testcases := []struct {
+		name           string
+		sql            string
+		olap           bool
+		queryResponses []sqltypes.QueryResponse
+		more           []bool
+		firstPacket    []bool
+		errExpected    bool
+	}{
+		{
+			name: "Empty query",
+			sql:  "",
+			queryResponses: []sqltypes.QueryResponse{
+				{QueryResult: nil, QueryError: sqlerror.NewSQLErrorFromError(sqlparser.ErrEmpty)},
+			},
+			more:        []bool{false},
+			firstPacket: []bool{true},
+			errExpected: false,
+		}, {
+			name: "Single query",
+			sql:  "select 1",
+			queryResponses: []sqltypes.QueryResponse{
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "1",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+						Rows: [][]sqltypes.Value{
+							{
+								sqltypes.NewInt64(1),
+							},
+						},
+					},
+					QueryError: nil,
+				},
+			},
+			more:        []bool{false},
+			firstPacket: []bool{true},
+			errExpected: false,
+		}, {
+			name: "Multiple queries - success",
+			sql:  "select 1; select 2; select 3;",
+			queryResponses: []sqltypes.QueryResponse{
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "1",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+						Rows: [][]sqltypes.Value{
+							{
+								sqltypes.NewInt64(1),
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "2",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+						Rows: [][]sqltypes.Value{
+							{
+								sqltypes.NewInt64(2),
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "3",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+						Rows: [][]sqltypes.Value{
+							{
+								sqltypes.NewInt64(3),
+							},
+						},
+					},
+					QueryError: nil,
+				},
+			},
+			more:        []bool{true, true, false},
+			firstPacket: []bool{true, true, true},
+			errExpected: false,
+		}, {
+			name: "Multiple queries - failure",
+			sql:  "select 1; select 2; parsing error; select 3;",
+			queryResponses: []sqltypes.QueryResponse{
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "1",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+						Rows: [][]sqltypes.Value{
+							{
+								sqltypes.NewInt64(1),
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "2",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+						Rows: [][]sqltypes.Value{
+							{
+								sqltypes.NewInt64(2),
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: nil,
+					QueryError:  errors.New("syntax error at position 8 near 'parsing' (errno 1105) (sqlstate HY000)"),
+				},
+			},
+			more:        []bool{true, true, false},
+			firstPacket: []bool{true, true, true},
+			errExpected: false,
+		}, {
+			name:           "Empty query - olap",
+			sql:            "",
+			olap:           true,
+			queryResponses: []sqltypes.QueryResponse{},
+			more:           []bool{false},
+			firstPacket:    []bool{true},
+			errExpected:    true,
+		}, {
+			name: "Single query - olap",
+			sql:  "select 1",
+			olap: true,
+			queryResponses: []sqltypes.QueryResponse{
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "1",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "1",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "1",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+						Rows: [][]sqltypes.Value{
+							{
+								sqltypes.NewInt64(1),
+							},
+						},
+					},
+					QueryError: nil,
+				},
+			},
+			more:        []bool{false, false, false},
+			firstPacket: []bool{true, false, false},
+			errExpected: false,
+		}, {
+			name: "Multiple queries - olap - success",
+			sql:  "select 1; select 2; select 3;",
+			olap: true,
+			queryResponses: []sqltypes.QueryResponse{
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "1",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "1",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "1",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+						Rows: [][]sqltypes.Value{
+							{
+								sqltypes.NewInt64(1),
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "2",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "2",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "2",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+						Rows: [][]sqltypes.Value{
+							{
+								sqltypes.NewInt64(2),
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "3",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "3",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "3",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+						Rows: [][]sqltypes.Value{
+							{
+								sqltypes.NewInt64(3),
+							},
+						},
+					},
+					QueryError: nil,
+				},
+			},
+			more:        []bool{true, true, true, true, true, true, false, false, false},
+			firstPacket: []bool{true, false, false, true, false, false, true, false, false},
+			errExpected: false,
+		}, {
+			name: "Multiple queries - olap - failure",
+			sql:  "select 1; select 2; parsing error; select 3;",
+			olap: true,
+			queryResponses: []sqltypes.QueryResponse{
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "1",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "1",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "1",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+						Rows: [][]sqltypes.Value{
+							{
+								sqltypes.NewInt64(1),
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "2",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "2",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: &sqltypes.Result{
+						Fields: []*querypb.Field{
+							{
+								Name:    "2",
+								Type:    sqltypes.Int64,
+								Flags:   uint32(querypb.MySqlFlag_NUM_FLAG | querypb.MySqlFlag_NOT_NULL_FLAG),
+								Charset: collations.CollationBinaryID,
+							},
+						},
+						Rows: [][]sqltypes.Value{
+							{
+								sqltypes.NewInt64(2),
+							},
+						},
+					},
+					QueryError: nil,
+				},
+				{
+					QueryResult: nil,
+					QueryError:  errors.New("syntax error at position 8 near 'parsing' (errno 1105) (sqlstate HY000)"),
+				},
+			},
+			more:        []bool{true, true, true, true, true, true, false},
+			firstPacket: []bool{true, false, false, true, false, false, true},
+			errExpected: false,
+		},
+	}
+
+	executor, _, _, _, _ := createExecutorEnv(t)
+	th := &testHandler{}
+	listener, err := mysql.NewListener("tcp", "127.0.0.1:", mysql.NewAuthServerNone(), th, 0, 0, false, false, 0, 0, false)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	// add a connection
+	mysqlConn := mysql.GetTestServerConn(listener)
+	mysqlConn.ConnectionID = 1
+	mysqlConn.UserData = &mysql.StaticUserData{}
+	mysqlConn.Capabilities = mysqlConn.Capabilities | mysql.CapabilityClientMultiStatements
+	vh := newVtgateHandler(newVTGate(executor, nil, nil, nil, nil))
+	vh.connections[1] = mysqlConn
+	for _, tt := range testcases {
+		t.Run(tt.name, func(t *testing.T) {
+			vh.session(mysqlConn).Options.Workload = querypb.ExecuteOptions_OLTP
+			if tt.olap {
+				vh.session(mysqlConn).Options.Workload = querypb.ExecuteOptions_OLAP
+			}
+			idx := 0
+			err = vh.ComQueryMulti(mysqlConn, tt.sql, func(qr sqltypes.QueryResponse, more bool, firstPacket bool) error {
+				assert.True(t, tt.queryResponses[idx].QueryResult.Equal(qr.QueryResult), "Result Got: %v", qr.QueryResult)
+				if tt.queryResponses[idx].QueryError != nil {
+					assert.Equal(t, tt.queryResponses[idx].QueryError.Error(), qr.QueryError.Error(), "Error Got: %v", qr.QueryError)
+				} else {
+					assert.Nil(t, qr.QueryError, "Error Got: %v", qr.QueryError)
+				}
+				assert.Equal(t, tt.more[idx], more, idx)
+				assert.Equal(t, tt.firstPacket[idx], firstPacket, idx)
+				idx++
+				return nil
+			})
+			assert.Equal(t, tt.errExpected, err != nil)
+			assert.Equal(t, len(tt.queryResponses), idx)
+		})
+	}
+}
+
 func TestGracefulShutdown(t *testing.T) {
 	executor, _, _, _, _ := createExecutorEnv(t)
 
 	vh := newVtgateHandler(&VTGate{executor: executor, timings: timings, rowsReturned: rowsReturned, rowsAffected: rowsAffected, queryTextCharsProcessed: queryTextCharsProcessed})
 	th := &testHandler{}
-	listener, err := mysql.NewListener("tcp", "127.0.0.1:", mysql.NewAuthServerNone(), th, 0, 0, false, false, 0, 0)
+	listener, err := mysql.NewListener("tcp", "127.0.0.1:", mysql.NewAuthServerNone(), th, 0, 0, false, false, 0, 0, false)
 	require.NoError(t, err)
 	defer listener.Close()
 
@@ -365,10 +890,18 @@ func TestGracefulShutdown(t *testing.T) {
 		return nil
 	})
 	assert.NoError(t, err)
+	err = vh.ComQueryMulti(mysqlConn, "select 1", func(res sqltypes.QueryResponse, more bool, firstPacket bool) error {
+		return nil
+	})
+	assert.NoError(t, err)
 
 	listener.Shutdown()
 
 	err = vh.ComQuery(mysqlConn, "select 1", func(result *sqltypes.Result) error {
+		return nil
+	})
+	require.EqualError(t, err, "Server shutdown in progress (errno 1053) (sqlstate 08S01)")
+	err = vh.ComQueryMulti(mysqlConn, "select 1", func(res sqltypes.QueryResponse, more bool, firstPacket bool) error {
 		return nil
 	})
 	require.EqualError(t, err, "Server shutdown in progress (errno 1053) (sqlstate 08S01)")
@@ -381,7 +914,7 @@ func TestGracefulShutdownWithTransaction(t *testing.T) {
 
 	vh := newVtgateHandler(&VTGate{executor: executor, timings: timings, rowsReturned: rowsReturned, rowsAffected: rowsAffected, queryTextCharsProcessed: queryTextCharsProcessed})
 	th := &testHandler{}
-	listener, err := mysql.NewListener("tcp", "127.0.0.1:", mysql.NewAuthServerNone(), th, 0, 0, false, false, 0, 0)
+	listener, err := mysql.NewListener("tcp", "127.0.0.1:", mysql.NewAuthServerNone(), th, 0, 0, false, false, 0, 0, false)
 	require.NoError(t, err)
 	defer listener.Close()
 

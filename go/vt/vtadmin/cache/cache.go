@@ -20,10 +20,11 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
-	"github.com/patrickmn/go-cache"
+	cache "github.com/patrickmn/go-cache"
 
 	"vitess.io/vitess/go/vt/log"
 )
@@ -119,17 +120,17 @@ type Cache[Key Keyer, Value any] struct {
 // enqueued (via EnqueueBackfill), fillFunc will be called with that request.
 func New[Key Keyer, Value any](fillFunc func(ctx context.Context, req Key) (Value, error), cfg Config) *Cache[Key, Value] {
 	if cfg.BackfillEnqueueWaitTime <= 0 {
-		log.Warningf("BackfillEnqueueWaitTime (%v) must be positive, defaulting to %v", cfg.BackfillEnqueueWaitTime, DefaultBackfillEnqueueWaitTime)
+		log.Warn(fmt.Sprintf("BackfillEnqueueWaitTime (%v) must be positive, defaulting to %v", cfg.BackfillEnqueueWaitTime, DefaultBackfillEnqueueWaitTime))
 		cfg.BackfillEnqueueWaitTime = DefaultBackfillEnqueueWaitTime
 	}
 
 	if cfg.BackfillRequestTTL <= 0 {
-		log.Warningf("BackfillRequestTTL (%v) must be positive, defaulting to %v", cfg.BackfillRequestTTL, DefaultBackfillRequestTTL)
+		log.Warn(fmt.Sprintf("BackfillRequestTTL (%v) must be positive, defaulting to %v", cfg.BackfillRequestTTL, DefaultBackfillRequestTTL))
 		cfg.BackfillRequestTTL = DefaultBackfillRequestTTL
 	}
 
 	if cfg.BackfillQueueSize < 0 {
-		log.Warningf("BackfillQueueSize (%v) must be positive, defaulting to %v", cfg.BackfillQueueSize, DefaultBackfillQueueSize)
+		log.Warn(fmt.Sprintf("BackfillQueueSize (%v) must be positive, defaulting to %v", cfg.BackfillQueueSize, DefaultBackfillQueueSize))
 		cfg.BackfillQueueSize = DefaultBackfillQueueSize
 	}
 
@@ -161,8 +162,13 @@ func (c *Cache[Key, Value]) add(key string, val Value, d time.Duration) error {
 	c.lastFill[key] = time.Now().UTC()
 	c.m.Unlock()
 
-	// Then cache the actual value.
-	return c.cache.Add(key, val, d)
+	_, expr, exists := c.cache.GetWithExpiration(key)
+	if exists && (expr.IsZero() || expr.After(time.Now())) {
+		return c.cache.Replace(key, val, d)
+	} else {
+		// Then cache the actual value.
+		return c.cache.Add(key, val, d)
+	}
 }
 
 // Get returns the Value stored for the key, if present in the cache. If the key
@@ -219,7 +225,7 @@ func (c *Cache[Key, Value]) backfill() {
 
 		if req.requestedAt.Add(c.cfg.BackfillRequestTTL).Before(time.Now()) {
 			// We took too long to get to this request, per config options.
-			log.Warningf("backfill for %s requested at %s; discarding due to exceeding TTL (%s)", req.k.Key(), req.requestedAt, c.cfg.BackfillRequestTTL)
+			log.Warn(fmt.Sprintf("backfill for %s requested at %s; discarding due to exceeding TTL (%s)", req.k.Key(), req.requestedAt, c.cfg.BackfillRequestTTL))
 			continue
 		}
 
@@ -230,7 +236,7 @@ func (c *Cache[Key, Value]) backfill() {
 			if !t.IsZero() && t.Add(c.cfg.BackfillRequestDuplicateInterval).After(time.Now()) {
 				// We recently added a value for this key to the cache, either via
 				// another backfill request, or directly via a call to Add.
-				log.Infof("filled cache for %s less than %s ago (at %s)", key, c.cfg.BackfillRequestDuplicateInterval, t.UTC())
+				log.Info(fmt.Sprintf("filled cache for %s less than %s ago (at %s)", key, c.cfg.BackfillRequestDuplicateInterval, t.UTC()))
 				c.m.Unlock()
 				continue
 			}
@@ -247,14 +253,14 @@ func (c *Cache[Key, Value]) backfill() {
 
 		val, err := c.fillFunc(c.ctx, req.k)
 		if err != nil {
-			log.Errorf("backfill failed for key %s: %s", key, err)
+			log.Error(fmt.Sprintf("backfill failed for key %s: %s", key, err))
 			// TODO: consider re-requesting with a retry-counter paired with a config to give up after N attempts
 			continue
 		}
 
 		// Finally, store the value.
 		if err := c.add(key, val, cache.DefaultExpiration); err != nil {
-			log.Warningf("failed to add (%s, %+v) to cache: %s", key, val, err)
+			log.Warn(fmt.Sprintf("failed to add (%s, %+v) to cache: %s", key, val, err))
 		}
 	}
 }

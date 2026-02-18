@@ -20,14 +20,13 @@ import (
 	"github.com/spf13/pflag"
 
 	"vitess.io/vitess/go/vt/servenv"
+	"vitess.io/vitess/go/vt/utils"
 )
 
-var (
-	openTSDBURI string
-)
+var openTSDBURI string
 
 func registerFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&openTSDBURI, "opentsdb_uri", openTSDBURI, "URI of opentsdb /api/put method")
+	utils.SetFlagStringVar(fs, &openTSDBURI, "opentsdb-uri", openTSDBURI, "URI of opentsdb /api/put method")
 }
 
 func init() {

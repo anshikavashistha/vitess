@@ -39,9 +39,11 @@ func (n Name) ConcatenateString(s string) string {
 func (n Name) Concatenate(other Name) Name {
 	return Name(n.ConcatenateString(other.String()))
 }
+
 func (n Name) SplitStrings() []string {
 	return strings.Split(n.String(), ":")
 }
+
 func (n Name) SplitMap() map[string]bool {
 	split := n.SplitStrings()
 	result := make(map[string]bool, len(split))
@@ -78,16 +80,15 @@ const (
 	SchemaTrackerName Name = "schema-tracker"
 
 	TestingName                Name = "test"
-	TestingAlwaysThrottlerName Name = "always-throttled-app"
+	TestingAlwaysThrottledName Name = "always-throttled-app"
+	QueryThrottlerName         Name = "query-throttler-app"
 )
 
-var (
-	exemptFromChecks = map[string]bool{
-		BinlogWatcherName.String(): true,
-		MessagerName.String():      true,
-		SchemaTrackerName.String(): true,
-	}
-)
+var exemptFromChecks = map[string]bool{
+	BinlogWatcherName.String(): true,
+	MessagerName.String():      true,
+	SchemaTrackerName.String(): true,
+}
 
 // ExemptFromChecks returns 'true' for apps that should skip the throttler checks. The throttler should
 // always respond with automated "OK" to those apps, without delay. These apps also do not cause a heartbeat renewal.

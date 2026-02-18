@@ -19,6 +19,8 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"strconv"
 
 	"vitess.io/vitess/go/sqltypes"
@@ -116,7 +118,7 @@ type RoutingParameters struct {
 
 	// TargetDestination specifies an explicit target destination to send the query to.
 	// This will bypass the routing logic.
-	TargetDestination key.Destination // update `user[-]@replica`.user set ....
+	TargetDestination key.ShardDestination // update `user[-]@replica`.user set ....
 
 	// Vindex specifies the vindex to be used.
 	Vindex vindexes.Vindex
@@ -194,7 +196,7 @@ func (rp *RoutingParameters) systemQuery(ctx context.Context, vcursor VCursor, b
 func (rp *RoutingParameters) routeInfoSchemaQuery(ctx context.Context, vcursor VCursor, bindVars map[string]*querypb.BindVariable) ([]*srvtopo.ResolvedShard, error) {
 	defaultRoute := func() ([]*srvtopo.ResolvedShard, error) {
 		ks := rp.Keyspace.Name
-		destinations, _, err := vcursor.ResolveDestinations(ctx, ks, nil, []key.Destination{key.DestinationAnyShard{}})
+		destinations, _, err := vcursor.ResolveDestinations(ctx, ks, nil, []key.ShardDestination{key.DestinationAnyShard{}})
 		return destinations, vterrors.Wrapf(err, "failed to find information about keyspace `%s`", ks)
 	}
 
@@ -258,9 +260,9 @@ func (rp *RoutingParameters) routeInfoSchemaQuery(ctx context.Context, vcursor V
 	}
 
 	// we only have table_schema to work with
-	destinations, _, err := vcursor.ResolveDestinations(ctx, specifiedKS, nil, []key.Destination{key.DestinationAnyShard{}})
+	destinations, _, err := vcursor.ResolveDestinations(ctx, specifiedKS, nil, []key.ShardDestination{key.DestinationAnyShard{}})
 	if err != nil {
-		log.Errorf("failed to route information_schema query to keyspace [%s]", specifiedKS)
+		log.Error(fmt.Sprintf("failed to route information_schema query to keyspace [%s]", specifiedKS))
 		bindVars[sqltypes.BvSchemaName] = sqltypes.StringBindVariable(specifiedKS)
 		return defaultRoute()
 	}
@@ -291,7 +293,7 @@ func (rp *RoutingParameters) routedTable(ctx context.Context, vcursor VCursor, b
 				return nil, vterrors.Errorf(vtrpcpb.Code_UNIMPLEMENTED, "cannot send the query to multiple keyspace due to different table_name: %s, %s", routedKs.Name, routedTable.Keyspace.Name)
 			}
 
-			shards, _, err := vcursor.ResolveDestinations(ctx, routedTable.Keyspace.Name, nil, []key.Destination{key.DestinationAnyShard{}})
+			shards, _, err := vcursor.ResolveDestinations(ctx, routedTable.Keyspace.Name, nil, []key.ShardDestination{key.DestinationAnyShard{}})
 			bindVars[tblBvName] = sqltypes.StringBindVariable(routedTable.Name.String())
 			if tableSchema != "" {
 				setReplaceSchemaName(bindVars)
@@ -305,7 +307,7 @@ func (rp *RoutingParameters) routedTable(ctx context.Context, vcursor VCursor, b
 }
 
 func (rp *RoutingParameters) anyShard(ctx context.Context, vcursor VCursor, bindVars map[string]*querypb.BindVariable) ([]*srvtopo.ResolvedShard, []map[string]*querypb.BindVariable, error) {
-	rss, _, err := vcursor.ResolveDestinations(ctx, rp.Keyspace.Name, nil, []key.Destination{key.DestinationAnyShard{}})
+	rss, _, err := vcursor.ResolveDestinations(ctx, rp.Keyspace.Name, nil, []key.ShardDestination{key.DestinationAnyShard{}})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -317,7 +319,7 @@ func (rp *RoutingParameters) anyShard(ctx context.Context, vcursor VCursor, bind
 }
 
 func (rp *RoutingParameters) unsharded(ctx context.Context, vcursor VCursor, bindVars map[string]*querypb.BindVariable) ([]*srvtopo.ResolvedShard, []map[string]*querypb.BindVariable, error) {
-	rss, _, err := vcursor.ResolveDestinations(ctx, rp.Keyspace.Name, nil, []key.Destination{key.DestinationAllShards{}})
+	rss, _, err := vcursor.ResolveDestinations(ctx, rp.Keyspace.Name, nil, []key.ShardDestination{key.DestinationAllShards{}})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -331,8 +333,8 @@ func (rp *RoutingParameters) unsharded(ctx context.Context, vcursor VCursor, bin
 	return rss, multiBindVars, nil
 }
 
-func (rp *RoutingParameters) byDestination(ctx context.Context, vcursor VCursor, bindVars map[string]*querypb.BindVariable, destination key.Destination) ([]*srvtopo.ResolvedShard, []map[string]*querypb.BindVariable, error) {
-	rss, _, err := vcursor.ResolveDestinations(ctx, rp.Keyspace.Name, nil, []key.Destination{destination})
+func (rp *RoutingParameters) byDestination(ctx context.Context, vcursor VCursor, bindVars map[string]*querypb.BindVariable, destination key.ShardDestination) ([]*srvtopo.ResolvedShard, []map[string]*querypb.BindVariable, error) {
+	rss, _, err := vcursor.ResolveDestinations(ctx, rp.Keyspace.Name, nil, []key.ShardDestination{destination})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -498,7 +500,6 @@ func resolveShards(
 	destinations, err := vindex.Map(ctx, vcursor, vindexKeys)
 	if err != nil {
 		return nil, nil, err
-
 	}
 
 	// And use the Resolver to map to ResolvedShards.
@@ -563,7 +564,6 @@ func resolveShardsBetween(ctx context.Context, vcursor VCursor, vindex vindexes.
 	destinations, err := vindex.RangeMap(ctx, vcursor, vindexKeys[0], vindexKeys[1])
 	if err != nil {
 		return nil, nil, err
-
 	}
 
 	// And use the Resolver to map to ResolvedShards.
@@ -574,9 +574,7 @@ func shardVars(bv map[string]*querypb.BindVariable, mapVals [][]*querypb.Value) 
 	shardVars := make([]map[string]*querypb.BindVariable, len(mapVals))
 	for i, vals := range mapVals {
 		newbv := make(map[string]*querypb.BindVariable, len(bv)+1)
-		for k, v := range bv {
-			newbv[k] = v
-		}
+		maps.Copy(newbv, bv)
 		newbv[ListVarName] = &querypb.BindVariable{
 			Type:   querypb.Type_TUPLE,
 			Values: vals,
@@ -590,9 +588,7 @@ func shardVarsMultiCol(bv map[string]*querypb.BindVariable, mapVals [][][]*query
 	shardVars := make([]map[string]*querypb.BindVariable, len(mapVals))
 	for i, shardVals := range mapVals {
 		newbv := make(map[string]*querypb.BindVariable, len(bv)+len(shardVals)-len(isSingleVal))
-		for k, v := range bv {
-			newbv[k] = v
-		}
+		maps.Copy(newbv, bv)
 		for j, vals := range shardVals {
 			if _, found := isSingleVal[j]; found {
 				// this vindex column is non-tuple column hence listVal bind variable is not required to be set.

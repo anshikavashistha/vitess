@@ -18,6 +18,7 @@ package vstreamer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,22 +29,22 @@ import (
 	"testing"
 	"time"
 
-	vttablet "vitess.io/vitess/go/vt/vttablet/common"
-
 	"github.com/stretchr/testify/require"
 
-	_flag "vitess.io/vitess/go/internal/flag"
 	"vitess.io/vitess/go/mysql"
 	"vitess.io/vitess/go/mysql/replication"
 	"vitess.io/vitess/go/vt/dbconfigs"
 	"vitess.io/vitess/go/vt/log"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vtenv"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/tabletenv"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/throttle/throttlerapp"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/vstreamer/testenv"
 
+	_flag "vitess.io/vitess/go/internal/flag"
 	binlogdatapb "vitess.io/vitess/go/vt/proto/binlogdata"
 	querypb "vitess.io/vitess/go/vt/proto/query"
+	vttablet "vitess.io/vitess/go/vt/vttablet/common"
 )
 
 var (
@@ -130,10 +131,10 @@ func runCases(t *testing.T, filter *binlogdatapb.Filter, testcases []testcase, p
 	// If position is 'current', we wait for a heartbeat to be
 	// sure the vstreamer has started.
 	if position == "current" {
-		log.Infof("Starting stream with current position")
+		log.Info("Starting stream with current position")
 		expectLog(ctx, t, "current pos", ch, [][]string{{`gtid`, `type:OTHER`}})
 	}
-	log.Infof("Starting to run test cases")
+	log.Info("Starting to run test cases")
 	for _, tcase := range testcases {
 		switch input := tcase.input.(type) {
 		case []string:
@@ -150,7 +151,7 @@ func runCases(t *testing.T, filter *binlogdatapb.Filter, testcases []testcase, p
 	if evs, ok := <-ch; ok {
 		t.Fatalf("unexpected evs: %v", evs)
 	}
-	log.Infof("Last line of runCases")
+	log.Info("Last line of runCases")
 }
 
 func expectLog(ctx context.Context, t *testing.T, input any, ch <-chan []*binlogdatapb.VEvent, output [][]string) {
@@ -211,7 +212,7 @@ func expectLog(ctx context.Context, t *testing.T, input any, ch <-chan []*binlog
 
 		numEventsToMatch := len(evs)
 		if len(wantset) != len(evs) {
-			log.Warningf("%v: evs\n%v, want\n%v, >> got length %d, wanted length %d", input, evs, wantset, len(evs), len(wantset))
+			log.Warn(fmt.Sprintf("%v: evs\n%v, want\n%v, >> got length %d, wanted length %d", input, evs, wantset, len(evs), len(wantset)))
 			if len(wantset) < len(evs) {
 				numEventsToMatch = len(wantset)
 			}
@@ -269,9 +270,13 @@ func expectLog(ctx context.Context, t *testing.T, input any, ch <-chan []*binlog
 				if !testRowEventFlags && evs[i].Type == binlogdatapb.VEventType_ROW {
 					evs[i].RowEvent.Flags = 0
 				}
+				// cleanup indeterministic fields:
+				evs[i].SequenceNumber = 0
+				evs[i].CommitParent = 0
+				evs[i].EventGtid = ""
 				want = env.RemoveAnyDeprecatedDisplayWidths(want)
 				if got := fmt.Sprintf("%v", evs[i]); got != want {
-					log.Errorf("%v (%d): event:\n%q, want\n%q", input, i, got, want)
+					log.Error(fmt.Sprintf("%v (%d): event:\n%q, want\n%q", input, i, got, want))
 					t.Fatalf("%v (%d): event:\n%q, want\n%q", input, i, got, want)
 				}
 			}
@@ -282,7 +287,15 @@ func expectLog(ctx context.Context, t *testing.T, input any, ch <-chan []*binlog
 	}
 }
 
+func startFullyThrottledStream(ctx context.Context, t *testing.T, filter *binlogdatapb.Filter, position string, tablePKs []*binlogdatapb.TableLastPK) (*sync.WaitGroup, <-chan []*binlogdatapb.VEvent) {
+	return startStreamWithAllOrNothingThrottlingOption(ctx, t, filter, position, tablePKs, true)
+}
+
 func startStream(ctx context.Context, t *testing.T, filter *binlogdatapb.Filter, position string, tablePKs []*binlogdatapb.TableLastPK) (*sync.WaitGroup, <-chan []*binlogdatapb.VEvent) {
+	return startStreamWithAllOrNothingThrottlingOption(ctx, t, filter, position, tablePKs, false)
+}
+
+func startStreamWithAllOrNothingThrottlingOption(ctx context.Context, t *testing.T, filter *binlogdatapb.Filter, position string, tablePKs []*binlogdatapb.TableLastPK, alwaysThrottle bool) (*sync.WaitGroup, <-chan []*binlogdatapb.VEvent) {
 	switch position {
 	case "":
 		position = primaryPosition(t)
@@ -297,14 +310,14 @@ func startStream(ctx context.Context, t *testing.T, filter *binlogdatapb.Filter,
 	go func() {
 		defer close(ch)
 		defer wg.Done()
-		if vstream(ctx, t, position, tablePKs, filter, ch) != nil {
+		if vstream(ctx, t, position, tablePKs, filter, ch, alwaysThrottle) != nil {
 			t.Log("vstream returned error")
 		}
 	}()
 	return &wg, ch
 }
 
-func vstream(ctx context.Context, t *testing.T, pos string, tablePKs []*binlogdatapb.TableLastPK, filter *binlogdatapb.Filter, ch chan []*binlogdatapb.VEvent) error {
+func vstream(ctx context.Context, t *testing.T, pos string, tablePKs []*binlogdatapb.TableLastPK, filter *binlogdatapb.Filter, ch chan []*binlogdatapb.VEvent, fullyThrottle bool) error {
 	if filter == nil {
 		filter = &binlogdatapb.Filter{
 			Rules: []*binlogdatapb.Rule{{
@@ -317,18 +330,28 @@ func vstream(ctx context.Context, t *testing.T, pos string, tablePKs []*binlogda
 	// values to the VStreamer for the duration of this test.
 	var options binlogdatapb.VStreamOptions
 	options.ConfigOverrides = make(map[string]string)
-	options.ConfigOverrides["vstream_dynamic_packet_size"] = strconv.FormatBool(vttablet.VStreamerUseDynamicPacketSize)
-	options.ConfigOverrides["vstream_packet_size"] = strconv.Itoa(vttablet.VStreamerDefaultPacketSize)
+	dynamicPacketSize := strconv.FormatBool(vttablet.VStreamerUseDynamicPacketSize)
+	packetSize := strconv.Itoa(vttablet.VStreamerDefaultPacketSize)
 
-	return engine.Stream(ctx, pos, tablePKs, filter, throttlerapp.VStreamerName, func(evs []*binlogdatapb.VEvent) error {
+	// Support both formats for backwards compatibility
+	// TODO(v25): Remove underscore versions
+	utils.SetFlagVariantsForTests(options.ConfigOverrides, "vstream-dynamic-packet-size", dynamicPacketSize)
+	utils.SetFlagVariantsForTests(options.ConfigOverrides, "vstream-packet-size", packetSize)
+
+	appName := throttlerapp.VStreamerName
+	if fullyThrottle {
+		appName = throttlerapp.TestingAlwaysThrottledName
+	}
+
+	return engine.Stream(ctx, pos, tablePKs, filter, appName, func(evs []*binlogdatapb.VEvent) error {
 		timer := time.NewTimer(2 * time.Second)
 		defer timer.Stop()
 
-		log.Infof("Received events: %v", evs)
+		log.Info(fmt.Sprintf("Received events: %v", evs))
 		select {
 		case ch <- evs:
 		case <-ctx.Done():
-			return fmt.Errorf("engine.Stream Done() stream ended early")
+			return errors.New("engine.Stream Done() stream ended early")
 		case <-timer.C:
 			t.Log("VStream timed out waiting for events")
 			return io.EOF
@@ -380,7 +403,7 @@ func setVSchema(t *testing.T, vschema string) {
 	}
 	// Wait for curCount to go up.
 	updated := false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		if engine.vschemaUpdates.Get() != curCount {
 			updated = true
 			break
@@ -388,7 +411,7 @@ func setVSchema(t *testing.T, vschema string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !updated {
-		log.Infof("vschema did not get updated")
+		log.Info("vschema did not get updated")
 		t.Error("vschema did not get updated")
 	}
 }

@@ -31,12 +31,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	"vitess.io/vitess/go/streamlog"
-
 	"vitess.io/vitess/go/event/syslogger"
 	"vitess.io/vitess/go/mysql/fakesqldb"
 	"vitess.io/vitess/go/mysql/sqlerror"
 	"vitess.io/vitess/go/sqltypes"
+	"vitess.io/vitess/go/streamlog"
 	querypb "vitess.io/vitess/go/vt/proto/query"
 	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
 	"vitess.io/vitess/go/vt/vtenv"
@@ -47,8 +46,7 @@ import (
 )
 
 func TestTxExecutorEmptyPrepare(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, _, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -58,7 +56,7 @@ func TestTxExecutorEmptyPrepare(t *testing.T) {
 	// taint the connection.
 	sc, err := tsv.te.txPool.GetAndLock(txid, "taint")
 	require.NoError(t, err)
-	sc.Taint(ctx, nil)
+	sc.Taint(ctx, tsv.te.reservedConnStats)
 	sc.Unlock()
 
 	err = txe.Prepare(txid, "aa")
@@ -69,8 +67,7 @@ func TestTxExecutorEmptyPrepare(t *testing.T) {
 }
 
 func TestExecutorPrepareFailure(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, _, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -80,7 +77,7 @@ func TestExecutorPrepareFailure(t *testing.T) {
 	// taint the connection.
 	sc, err := tsv.te.txPool.GetAndLock(txid, "taint")
 	require.NoError(t, err)
-	sc.Taint(ctx, nil)
+	sc.Taint(ctx, tsv.te.reservedConnStats)
 	sc.Unlock()
 
 	// try 2pc commit of Metadata Manager.
@@ -89,8 +86,7 @@ func TestExecutorPrepareFailure(t *testing.T) {
 }
 
 func TestTxExecutorPrepare(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, _, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 	txid := newTxForPrep(ctx, tsv)
@@ -108,8 +104,7 @@ func TestTxExecutorPrepare(t *testing.T) {
 
 // TestTxExecutorPrepareResevedConn tests the case where a reserved connection is used for prepare.
 func TestDTExecutorPrepareResevedConn(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, _, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 	txid := newTxForPrep(ctx, tsv)
@@ -122,8 +117,7 @@ func TestDTExecutorPrepareResevedConn(t *testing.T) {
 }
 
 func TestTxExecutorPrepareNotInTx(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, _, _, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 	err := txe.Prepare(0, "aa")
@@ -131,8 +125,7 @@ func TestTxExecutorPrepareNotInTx(t *testing.T) {
 }
 
 func TestTxExecutorPreparePoolFail(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, _, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 	txid1 := newTxForPrep(ctx, tsv)
@@ -146,8 +139,7 @@ func TestTxExecutorPreparePoolFail(t *testing.T) {
 }
 
 func TestTxExecutorPrepareRedoBeginFail(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 	txid := newTxForPrep(ctx, tsv)
@@ -159,8 +151,7 @@ func TestTxExecutorPrepareRedoBeginFail(t *testing.T) {
 }
 
 func TestTxExecutorPrepareRedoFail(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, _, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 	txid := newTxForPrep(ctx, tsv)
@@ -171,8 +162,7 @@ func TestTxExecutorPrepareRedoFail(t *testing.T) {
 }
 
 func TestTxExecutorPrepareRedoCommitFail(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 	txid := newTxForPrep(ctx, tsv)
@@ -184,8 +174,7 @@ func TestTxExecutorPrepareRedoCommitFail(t *testing.T) {
 }
 
 func TestExecutorPrepareRuleFailure(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, _, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -216,8 +205,7 @@ func TestExecutorPrepareRuleFailure(t *testing.T) {
 }
 
 func TestExecutorPrepareConnFailure(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, _, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -236,8 +224,7 @@ func TestExecutorPrepareConnFailure(t *testing.T) {
 }
 
 func TestTxExecutorCommit(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, _, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 	txid := newTxForPrep(ctx, tsv)
@@ -251,8 +238,7 @@ func TestTxExecutorCommit(t *testing.T) {
 }
 
 func TestTxExecutorCommitRedoFail(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -283,8 +269,7 @@ func TestTxExecutorCommitRedoFail(t *testing.T) {
 }
 
 func TestTxExecutorCommitRedoCommitFail(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 	txid := newTxForPrep(ctx, tsv)
@@ -298,8 +283,7 @@ func TestTxExecutorCommitRedoCommitFail(t *testing.T) {
 }
 
 func TestTxExecutorRollbackBeginFail(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 	txid := newTxForPrep(ctx, tsv)
@@ -312,8 +296,7 @@ func TestTxExecutorRollbackBeginFail(t *testing.T) {
 }
 
 func TestTxExecutorRollbackRedoFail(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 	txid := newTxForPrep(ctx, tsv)
@@ -327,8 +310,7 @@ func TestTxExecutorRollbackRedoFail(t *testing.T) {
 }
 
 func TestExecutorCreateTransaction(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, _, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -342,8 +324,7 @@ func TestExecutorCreateTransaction(t *testing.T) {
 }
 
 func TestExecutorStartCommit(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -363,8 +344,7 @@ func TestExecutorStartCommit(t *testing.T) {
 }
 
 func TestExecutorStartCommitFailure(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -374,7 +354,7 @@ func TestExecutorStartCommitFailure(t *testing.T) {
 	// taint the connection.
 	sc, err := tsv.te.txPool.GetAndLock(txid, "taint")
 	require.NoError(t, err)
-	sc.Taint(ctx, nil)
+	sc.Taint(ctx, tsv.te.reservedConnStats)
 	sc.Unlock()
 
 	// add rollback state update expectation
@@ -388,8 +368,7 @@ func TestExecutorStartCommitFailure(t *testing.T) {
 }
 
 func TestExecutorSetRollback(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -408,8 +387,7 @@ func TestExecutorSetRollback(t *testing.T) {
 
 // TestExecutorUnresolvedTransactions tests with what timestamp value the query is executed to fetch unresolved transactions.
 func TestExecutorUnresolvedTransactions(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, _, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -444,7 +422,6 @@ func TestExecutorUnresolvedTransactions(t *testing.T) {
 			require.WithinDuration(t, timeCreated, tcase.expected, 10*time.Millisecond)
 		})
 	}
-
 }
 
 func convertNanoStringToTime(t *testing.T, unixNanoStr string) time.Time {
@@ -463,8 +440,7 @@ func convertNanoStringToTime(t *testing.T, unixNanoStr string) time.Time {
 }
 
 func TestExecutorConcludeTransaction(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, _, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -475,8 +451,7 @@ func TestExecutorConcludeTransaction(t *testing.T) {
 }
 
 func TestExecutorReadTransaction(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, _, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -576,8 +551,7 @@ func TestExecutorReadTransaction(t *testing.T) {
 }
 
 func TestExecutorReadAllTransactions(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, _, db, closer := newTestTxExecutor(t, ctx)
 	defer closer()
 
@@ -616,8 +590,7 @@ func TestExecutorReadAllTransactions(t *testing.T) {
 // TestTransactionNotifier tests that the transaction notifier is called
 // when a transaction watcher receives unresolved transaction count more than zero.
 func TestTransactionNotifier(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	_, tsv, db := newShortAgeExecutor(t, ctx)
 	defer db.Close()
@@ -652,8 +625,7 @@ func TestTransactionNotifier(t *testing.T) {
 }
 
 func TestNoTwopc(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	txe, tsv, db := newNoTwopcExecutor(t, ctx)
 	defer db.Close()
 	defer tsv.StopService()
@@ -773,7 +745,7 @@ func newNoTwopcExecutor(t *testing.T, ctx context.Context) (txe *DTExecutor, tsv
 func newTxForPrep(ctx context.Context, tsv *TabletServer) int64 {
 	txid := newTransaction(tsv, nil)
 	target := querypb.Target{TabletType: topodatapb.TabletType_PRIMARY}
-	_, err := tsv.Execute(ctx, &target, "update test_table set name = 2 where pk = 1", nil, txid, 0, nil)
+	_, err := tsv.Execute(ctx, nil, &target, "update test_table set name = 2 where pk = 1", nil, txid, 0, nil)
 	if err != nil {
 		panic(err)
 	}

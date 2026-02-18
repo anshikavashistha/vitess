@@ -17,7 +17,6 @@ limitations under the License.
 package transaction
 
 import (
-	"context"
 	_ "embed"
 	"flag"
 	"fmt"
@@ -29,6 +28,7 @@ import (
 	"vitess.io/vitess/go/mysql"
 	"vitess.io/vitess/go/test/endtoend/cluster"
 	twopcutil "vitess.io/vitess/go/test/endtoend/transaction/twopc/utils"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vtctl/reparentutil/policy"
 )
 
@@ -65,15 +65,16 @@ func TestMain(m *testing.M) {
 
 		// Set extra args for twopc
 		clusterInstance.VtGateExtraArgs = append(clusterInstance.VtGateExtraArgs,
-			"--transaction_mode", "TWOPC",
-			"--grpc_use_effective_callerid",
+			"--transaction-mode", "TWOPC",
+			utils.GetFlagVariantForTests("--grpc-use-effective-callerid"),
 		)
 		clusterInstance.VtTabletExtraArgs = append(clusterInstance.VtTabletExtraArgs,
-			"--twopc_abandon_age", "1",
+			utils.GetFlagVariantForTests("--twopc-abandon-age"), "1",
 			"--queryserver-config-transaction-cap", "100",
 		)
 
 		// Start keyspace
+		cell := clusterInstance.Cell
 		keyspace := &cluster.Keyspace{
 			Name:             keyspaceName,
 			SchemaSQL:        SchemaSQL,
@@ -81,7 +82,7 @@ func TestMain(m *testing.M) {
 			SidecarDBName:    sidecarDBName,
 			DurabilityPolicy: policy.DurabilitySemiSync,
 		}
-		if err := clusterInstance.StartKeyspace(*keyspace, []string{"-40", "40-80", "80-"}, 2, false); err != nil {
+		if err := clusterInstance.StartKeyspace(*keyspace, []string{"-40", "40-80", "80-"}, 2, false, cell); err != nil {
 			return 1
 		}
 
@@ -98,7 +99,7 @@ func TestMain(m *testing.M) {
 }
 
 func start(t *testing.T) (*mysql.Conn, func()) {
-	ctx := context.Background()
+	ctx := t.Context()
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.NoError(t, err)
 	cleanup(t)

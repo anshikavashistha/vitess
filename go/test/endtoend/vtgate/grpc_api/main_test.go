@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"vitess.io/vitess/go/test/endtoend/cluster"
+	"vitess.io/vitess/go/vt/utils"
 )
 
 var (
@@ -88,7 +89,7 @@ func TestMain(m *testing.M) {
 
 		// Directory for authn / authz config files
 		authDirectory := path.Join(clusterInstance.TmpDirectory, "auth")
-		if err := os.Mkdir(authDirectory, 0700); err != nil {
+		if err := os.Mkdir(authDirectory, 0o700); err != nil {
 			return 1
 		}
 
@@ -106,11 +107,10 @@ func TestMain(m *testing.M) {
 
 		// Configure vtgate to use static auth
 		clusterInstance.VtGateExtraArgs = []string{
-			"--grpc_auth_mode", "static",
-			"--grpc_auth_static_password_file", grpcServerAuthStaticPath,
-			"--grpc_use_effective_callerid",
-			"--grpc-use-static-authentication-callerid",
-			"--grpc-send-session-in-streaming",
+			utils.GetFlagVariantForTests("--grpc-auth-mode"), "static",
+			utils.GetFlagVariantForTests("--grpc-auth-static-password-file"), grpcServerAuthStaticPath,
+			utils.GetFlagVariantForTests("--grpc-use-effective-callerid"),
+			utils.GetFlagVariantForTests("--grpc-use-static-authentication-callerid"),
 		}
 
 		// Configure vttablet to use table ACL
@@ -125,7 +125,7 @@ func TestMain(m *testing.M) {
 			Name:      keyspaceName,
 			SchemaSQL: sqlSchema,
 		}
-		if err := clusterInstance.StartUnshardedKeyspace(*keyspace, 1, false); err != nil {
+		if err := clusterInstance.StartUnshardedKeyspace(*keyspace, 1, false, clusterInstance.Cell); err != nil {
 			return 1
 		}
 

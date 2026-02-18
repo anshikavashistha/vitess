@@ -21,14 +21,20 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
+
+	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
 )
 
 // Instance represents a database instance, including its current configuration & status.
 // It presents important replication configuration and detailed replication status.
 type Instance struct {
-	Hostname                     string
-	Port                         int
-	InstanceAlias                string
+	Hostname      string
+	Port          int
+	InstanceAlias string
+	// TabletType is the tablet type that the instance
+	// publishes to the VtGates and believes itself to be.
+	TabletType                   topodatapb.TabletType
+	Cell                         string
 	ServerID                     uint
 	ServerUUID                   string
 	Version                      string
@@ -71,9 +77,6 @@ type Instance struct {
 	primaryExecutedGtidSet string // Not exported
 
 	ReplicationLagSeconds              sql.NullInt64
-	DataCenter                         string
-	Region                             string
-	PhysicalEnvironment                string
 	ReplicationDepth                   uint
 	IsCoPrimary                        bool
 	HasReplicationCredentials          bool

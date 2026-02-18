@@ -46,21 +46,6 @@ func (sc *SimpleProjection) NeedsTransaction() bool {
 	return sc.Input.NeedsTransaction()
 }
 
-// RouteType returns a description of the query routing type used by the primitive
-func (sc *SimpleProjection) RouteType() string {
-	return sc.Input.RouteType()
-}
-
-// GetKeyspaceName specifies the Keyspace that this primitive routes to.
-func (sc *SimpleProjection) GetKeyspaceName() string {
-	return sc.Input.GetKeyspaceName()
-}
-
-// GetTableName specifies the table that this primitive routes to.
-func (sc *SimpleProjection) GetTableName() string {
-	return sc.Input.GetTableName()
-}
-
 // TryExecute performs a non-streaming exec.
 func (sc *SimpleProjection) TryExecute(ctx context.Context, vcursor VCursor, bindVars map[string]*querypb.BindVariable, wantfields bool) (*sqltypes.Result, error) {
 	inner, err := vcursor.ExecutePrimitive(ctx, sc.Input, bindVars, wantfields)
@@ -119,7 +104,17 @@ func (sc *SimpleProjection) buildFields(inner *sqltypes.Result) []*querypb.Field
 	if len(inner.Fields) == 0 {
 		return nil
 	}
-	fields := make([]*querypb.Field, 0, len(sc.Cols))
+	fields := make([]*querypb.Field, 0, len(sc.ColNames))
+	if sc.namesOnly() {
+		for idx, field := range inner.Fields {
+			if sc.ColNames[idx] != "" {
+				field = proto.Clone(field).(*querypb.Field)
+				field.Name = sc.ColNames[idx]
+			}
+			fields = append(fields, field)
+		}
+		return fields
+	}
 	for idx, col := range sc.Cols {
 		field := inner.Fields[col]
 		if sc.ColNames[idx] != "" {

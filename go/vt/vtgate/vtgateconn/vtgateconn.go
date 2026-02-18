@@ -26,6 +26,7 @@ import (
 	"vitess.io/vitess/go/sqltypes"
 	"vitess.io/vitess/go/vt/log"
 	"vitess.io/vitess/go/vt/servenv"
+	"vitess.io/vitess/go/vt/utils"
 
 	binlogdatapb "vitess.io/vitess/go/vt/proto/binlogdata"
 	querypb "vitess.io/vitess/go/vt/proto/query"
@@ -37,7 +38,7 @@ import (
 var vtgateProtocol = "grpc"
 
 func registerFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&vtgateProtocol, "vtgate_protocol", vtgateProtocol, "how to talk to vtgate")
+	utils.SetFlagStringVar(fs, &vtgateProtocol, "vtgate-protocol", vtgateProtocol, "how to talk to vtgate")
 }
 
 func init() {
@@ -102,7 +103,8 @@ type VStreamReader interface {
 
 // VStream streams binlog events.
 func (conn *VTGateConn) VStream(ctx context.Context, tabletType topodatapb.TabletType, vgtid *binlogdatapb.VGtid,
-	filter *binlogdatapb.Filter, flags *vtgatepb.VStreamFlags) (VStreamReader, error) {
+	filter *binlogdatapb.Filter, flags *vtgatepb.VStreamFlags,
+) (VStreamReader, error) {
 	return conn.impl.VStream(ctx, tabletType, vgtid, filter, flags)
 }
 
@@ -118,8 +120,8 @@ type VTGateSession struct {
 }
 
 // Execute performs a VTGate Execute.
-func (sn *VTGateSession) Execute(ctx context.Context, query string, bindVars map[string]*querypb.BindVariable) (*sqltypes.Result, error) {
-	session, res, err := sn.impl.Execute(ctx, sn.session, query, bindVars)
+func (sn *VTGateSession) Execute(ctx context.Context, query string, bindVars map[string]*querypb.BindVariable, prepared bool) (*sqltypes.Result, error) {
+	session, res, err := sn.impl.Execute(ctx, sn.session, query, bindVars, prepared)
 	sn.session = session
 	return res, err
 }
@@ -129,6 +131,13 @@ func (sn *VTGateSession) ExecuteBatch(ctx context.Context, query []string, bindV
 	session, res, errs := sn.impl.ExecuteBatch(ctx, sn.session, query, bindVars)
 	sn.session = session
 	return res, errs
+}
+
+// ExecuteMulti performs a VTGate ExecuteMulti.
+func (sn *VTGateSession) ExecuteMulti(ctx context.Context, query string) ([]*sqltypes.Result, error) {
+	session, res, err := sn.impl.ExecuteMulti(ctx, sn.session, query)
+	sn.session = session
+	return res, err
 }
 
 // StreamExecute executes a streaming query on vtgate.
@@ -144,11 +153,29 @@ func (sn *VTGateSession) StreamExecute(ctx context.Context, query string, bindVa
 	})
 }
 
+// StreamExecuteMulti executes a set of streaming queries on vtgate.
+// It returns a MultiResultStream and an error. First check the
+// error. Then you can pull values from the MultiResultStream until io.EOF,
+// or another error. The boolean field tells you when a new result starts.
+func (sn *VTGateSession) StreamExecuteMulti(ctx context.Context, query string) (sqltypes.MultiResultStream, error) {
+	// passing in the function that will update the session when received on the stream.
+	return sn.impl.StreamExecuteMulti(ctx, sn.session, query, func(response *vtgatepb.StreamExecuteMultiResponse) {
+		if response.Session != nil {
+			sn.session = response.Session
+		}
+	})
+}
+
 // Prepare performs a VTGate Prepare.
-func (sn *VTGateSession) Prepare(ctx context.Context, query string, bindVars map[string]*querypb.BindVariable) ([]*querypb.Field, error) {
-	session, fields, err := sn.impl.Prepare(ctx, sn.session, query, bindVars)
+func (sn *VTGateSession) Prepare(ctx context.Context, query string) ([]*querypb.Field, uint16, error) {
+	session, fields, paramsCount, err := sn.impl.Prepare(ctx, sn.session, query)
 	sn.session = session
-	return fields, err
+	return fields, paramsCount, err
+}
+
+// CloseSession closes the session provided by rolling back any active transaction.
+func (sn *VTGateSession) CloseSession(ctx context.Context) error {
+	return sn.impl.CloseSession(ctx, sn.session)
 }
 
 //
@@ -159,7 +186,7 @@ func (sn *VTGateSession) Prepare(ctx context.Context, query string, bindVars map
 // implementation. It can be used concurrently across goroutines.
 type Impl interface {
 	// Execute executes a non-streaming query on vtgate.
-	Execute(ctx context.Context, session *vtgatepb.Session, query string, bindVars map[string]*querypb.BindVariable) (*vtgatepb.Session, *sqltypes.Result, error)
+	Execute(ctx context.Context, session *vtgatepb.Session, query string, bindVars map[string]*querypb.BindVariable, prepared bool) (*vtgatepb.Session, *sqltypes.Result, error)
 
 	// ExecuteBatch executes a non-streaming queries on vtgate.
 	ExecuteBatch(ctx context.Context, session *vtgatepb.Session, queryList []string, bindVarsList []map[string]*querypb.BindVariable) (*vtgatepb.Session, []sqltypes.QueryResponse, error)
@@ -167,8 +194,14 @@ type Impl interface {
 	// StreamExecute executes a streaming query on vtgate.
 	StreamExecute(ctx context.Context, session *vtgatepb.Session, query string, bindVars map[string]*querypb.BindVariable, processResponse func(*vtgatepb.StreamExecuteResponse)) (sqltypes.ResultStream, error)
 
+	// ExecuteMulti executes multiple non-streaming queries.
+	ExecuteMulti(ctx context.Context, session *vtgatepb.Session, sqlString string) (*vtgatepb.Session, []*sqltypes.Result, error)
+
+	// StreamExecuteMulti executes multiple streaming queries.
+	StreamExecuteMulti(ctx context.Context, session *vtgatepb.Session, sqlString string, processResponse func(response *vtgatepb.StreamExecuteMultiResponse)) (sqltypes.MultiResultStream, error)
+
 	// Prepare returns the fields information for the query as part of supporting prepare statements.
-	Prepare(ctx context.Context, session *vtgatepb.Session, sql string, bindVariables map[string]*querypb.BindVariable) (*vtgatepb.Session, []*querypb.Field, error)
+	Prepare(ctx context.Context, session *vtgatepb.Session, sql string) (*vtgatepb.Session, []*querypb.Field, uint16, error)
 
 	// CloseSession closes the session provided by rolling back any active transaction.
 	CloseSession(ctx context.Context, session *vtgatepb.Session) error
@@ -196,7 +229,7 @@ func RegisterDialer(name string, dialer DialerFunc) {
 	defer dialersM.Unlock()
 
 	if _, ok := dialers[name]; ok {
-		log.Warningf("Dialer %s already exists, overwriting it", name)
+		log.Warn(fmt.Sprintf("Dialer %s already exists, overwriting it", name))
 	}
 	dialers[name] = dialer
 }
@@ -234,4 +267,15 @@ func DialProtocol(ctx context.Context, protocol string, address string) (*VTGate
 // the *VTGateConn.
 func Dial(ctx context.Context, address string) (*VTGateConn, error) {
 	return DialProtocol(ctx, vtgateProtocol, address)
+}
+
+// DialCustom creates a new VTGateConn with the given DialerFunc.
+func DialCustom(ctx context.Context, dialer DialerFunc, address string) (*VTGateConn, error) {
+	impl, err := dialer(ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	return &VTGateConn{
+		impl: impl,
+	}, nil
 }

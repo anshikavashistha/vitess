@@ -18,6 +18,8 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"time"
 
 	"vitess.io/vitess/go/timer"
@@ -25,6 +27,7 @@ import (
 	"vitess.io/vitess/go/vt/logutil"
 	"vitess.io/vitess/go/vt/schemamanager"
 	"vitess.io/vitess/go/vt/servenv"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vtctl/grpcvtctldserver"
 	"vitess.io/vitess/go/vt/vttablet/tmclient"
 	"vitess.io/vitess/go/vt/wrangler"
@@ -39,12 +42,12 @@ var (
 )
 
 func init() {
-	Main.Flags().StringVar(&schemaChangeDir, "schema_change_dir", schemaChangeDir, "Directory containing schema changes for all keyspaces. Each keyspace has its own directory, and schema changes are expected to live in '$KEYSPACE/input' dir. (e.g. 'test_keyspace/input/*sql'). Each sql file represents a schema change.")
-	Main.Flags().StringVar(&schemaChangeController, "schema_change_controller", schemaChangeController, "Schema change controller is responsible for finding schema changes and responding to schema change events.")
-	Main.Flags().StringVar(&schemaChangeUser, "schema_change_user", schemaChangeUser, "The user who schema changes are submitted on behalf of.")
+	utils.SetFlagStringVar(Main.Flags(), &schemaChangeDir, "schema-change-dir", schemaChangeDir, "Directory containing schema changes for all keyspaces. Each keyspace has its own directory, and schema changes are expected to live in '$KEYSPACE/input' dir. (e.g. 'test_keyspace/input/*sql'). Each sql file represents a schema change.")
+	utils.SetFlagStringVar(Main.Flags(), &schemaChangeController, "schema-change-controller", schemaChangeController, "Schema change controller is responsible for finding schema changes and responding to schema change events.")
+	utils.SetFlagStringVar(Main.Flags(), &schemaChangeUser, "schema-change-user", schemaChangeUser, "The user who schema changes are submitted on behalf of.")
 
-	Main.Flags().DurationVar(&schemaChangeCheckInterval, "schema_change_check_interval", schemaChangeCheckInterval, "How often the schema change dir is checked for schema changes. This value must be positive; if zero or lower, the default of 1m is used.")
-	Main.Flags().DurationVar(&schemaChangeReplicasTimeout, "schema_change_replicas_timeout", schemaChangeReplicasTimeout, "How long to wait for replicas to receive a schema change.")
+	utils.SetFlagDurationVar(Main.Flags(), &schemaChangeCheckInterval, "schema-change-check-interval", schemaChangeCheckInterval, "How often the schema change dir is checked for schema changes. This value must be positive; if zero or lower, the default of 1m is used.")
+	utils.SetFlagDurationVar(Main.Flags(), &schemaChangeReplicasTimeout, "schema-change-replicas-timeout", schemaChangeReplicasTimeout, "How long to wait for replicas to receive a schema change.")
 }
 
 func initSchema(ctx context.Context) {
@@ -55,10 +58,10 @@ func initSchema(ctx context.Context) {
 			interval = time.Minute
 		}
 		timer := timer.NewTimer(interval)
-		controllerFactory, err :=
-			schemamanager.GetControllerFactory(schemaChangeController)
+		controllerFactory, err := schemamanager.GetControllerFactory(schemaChangeController)
 		if err != nil {
-			log.Fatalf("unable to get a controller factory, error: %v", err)
+			log.Error(fmt.Sprintf("unable to get a controller factory, error: %v", err))
+			os.Exit(1)
 		}
 
 		timer.Start(func() {
@@ -67,7 +70,7 @@ func initSchema(ctx context.Context) {
 				schemamanager.SchemaChangeUser:    schemaChangeUser,
 			})
 			if err != nil {
-				log.Errorf("failed to get controller, error: %v", err)
+				log.Error(fmt.Sprintf("failed to get controller, error: %v", err))
 				return
 			}
 			wr := wrangler.New(env, logutil.NewConsoleLogger(), ts, tmclient.NewTabletManagerClient())
@@ -77,7 +80,7 @@ func initSchema(ctx context.Context) {
 				schemamanager.NewTabletExecutor("vtctld/schema", wr.TopoServer(), wr.TabletManagerClient(), wr.Logger(), schemaChangeReplicasTimeout, 0, env.Parser()),
 			)
 			if err != nil {
-				log.Errorf("Schema change failed, error: %v", err)
+				log.Error(fmt.Sprintf("Schema change failed, error: %v", err))
 			}
 		})
 		servenv.OnClose(func() { timer.Stop() })

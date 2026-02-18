@@ -317,12 +317,16 @@ func TestNormalize(t *testing.T) {
 			"bv1": sqltypes.TestBindVariable([]any{1, "2"}),
 		},
 	}, {
-		// EXPLAIN queries
-		in:      "explain select * from t where v1 in (1, '2')",
-		outstmt: "explain select * from t where v1 in ::bv1",
+		// repeated IN clause with vals
+		in:      "select * from t where v1 in (1, '2') OR v2 in (1, '2')",
+		outstmt: "select * from t where v1 in ::bv1 or v2 in ::bv1",
 		outbv: map[string]*querypb.BindVariable{
 			"bv1": sqltypes.TestBindVariable([]any{1, "2"}),
 		},
+	}, { // EXPLAIN query will be normalized and not parameterized
+		in:      "explain select @x from t where v1 in (1, '2')",
+		outstmt: "explain select :__vtudvx as `@x` from t where v1 in (1, '2')",
+		outbv:   map[string]*querypb.BindVariable{},
 	}, {
 		// NOT IN clause
 		in:      "select * from t where v1 not in (1, '2')",
@@ -378,9 +382,9 @@ func TestNormalize(t *testing.T) {
 			"bv1": sqltypes.ValueBindVariable(sqltypes.MakeTrusted(sqltypes.Datetime, []byte("2022-08-06 17:05:12"))),
 		},
 	}, {
-		// TimestampVal should also be normalized
-		in:      `explain select comms_by_companies.* from comms_by_companies where comms_by_companies.id = 'rjve634shXzaavKHbAH16ql6OrxJ' limit 1,1`,
-		outstmt: `explain select comms_by_companies.* from comms_by_companies where comms_by_companies.id = :comms_by_companies_id /* VARCHAR */ limit :bv1 /* INT64 */, :bv2 /* INT64 */`,
+		// TimestampVal should also be parameterized
+		in:      `select comms_by_companies.* from comms_by_companies where comms_by_companies.id = 'rjve634shXzaavKHbAH16ql6OrxJ' limit 1,1`,
+		outstmt: `select comms_by_companies.* from comms_by_companies where comms_by_companies.id = :comms_by_companies_id /* VARCHAR */ limit :bv1 /* INT64 */, :bv2 /* INT64 */`,
 		outbv: map[string]*querypb.BindVariable{
 			"bv1":                   sqltypes.Int64BindVariable(1),
 			"bv2":                   sqltypes.Int64BindVariable(1),
@@ -443,6 +447,11 @@ func TestNormalize(t *testing.T) {
 			"bv1": sqltypes.Int64BindVariable(1),
 			"bv2": sqltypes.Int64BindVariable(0),
 		},
+	}, {
+		// Verify we don't change anything in the normalization of create procedures.
+		in:      "CREATE PROCEDURE p2 (in x BIGINT) BEGIN declare y DECIMAL(14,2); START TRANSACTION; set y = 4.2; SELECT 128 from dual; COMMIT; END",
+		outstmt: "create procedure p2 (in x BIGINT) begin declare y DECIMAL(14,2); start transaction; set y = 4.2; select 128 from dual; commit; end;",
+		outbv:   map[string]*querypb.BindVariable{},
 	}}
 	parser := NewTestParser()
 	for _, tc := range testcases {
@@ -451,7 +460,7 @@ func TestNormalize(t *testing.T) {
 			require.NoError(t, err)
 			known := getBindvars(stmt)
 			bv := make(map[string]*querypb.BindVariable)
-			out, err := PrepareAST(stmt, NewReservedVars(prefix, known), bv, true, "ks", 0, "", map[string]string{}, nil, nil)
+			out, err := Normalize(stmt, NewReservedVars(prefix, known), bv, true, "ks", 0, "", map[string]string{}, nil, nil)
 			require.NoError(t, err)
 			assert.Equal(t, tc.outstmt, String(out.AST))
 			assert.Equal(t, tc.outbv, bv)
@@ -480,7 +489,7 @@ func TestNormalizeInvalidDates(t *testing.T) {
 			require.NoError(t, err)
 			known := getBindvars(stmt)
 			bv := make(map[string]*querypb.BindVariable)
-			_, err = PrepareAST(stmt, NewReservedVars("bv", known), bv, true, "ks", 0, "", map[string]string{}, nil, nil)
+			_, err = Normalize(stmt, NewReservedVars("bv", known), bv, true, "ks", 0, "", map[string]string{}, nil, nil)
 			require.EqualError(t, err, tc.err.Error())
 		})
 	}
@@ -502,7 +511,7 @@ func TestNormalizeValidSQL(t *testing.T) {
 			bv := make(map[string]*querypb.BindVariable)
 			known := make(BindVars)
 
-			out, err := PrepareAST(tree, NewReservedVars("vtg", known), bv, true, "ks", 0, "", map[string]string{}, nil, nil)
+			out, err := Normalize(tree, NewReservedVars("vtg", known), bv, true, "ks", 0, "", map[string]string{}, nil, nil)
 			require.NoError(t, err)
 			normalizerOutput := String(out.AST)
 			if normalizerOutput == "otheradmin" || normalizerOutput == "otherread" {
@@ -533,7 +542,7 @@ func TestNormalizeOneCasae(t *testing.T) {
 	}
 	bv := make(map[string]*querypb.BindVariable)
 	known := make(BindVars)
-	out, err := PrepareAST(tree, NewReservedVars("vtg", known), bv, true, "ks", 0, "", map[string]string{}, nil, nil)
+	out, err := Normalize(tree, NewReservedVars("vtg", known), bv, true, "ks", 0, "", map[string]string{}, nil, nil)
 	require.NoError(t, err)
 	normalizerOutput := String(out.AST)
 	require.EqualValues(t, testOne.output, normalizerOutput)
@@ -578,7 +587,7 @@ type myTestCase struct {
 	ddlStrategy, migrationContext, sessionUUID, sessionEnableSystemSettings                 bool
 	udv                                                                                     int
 	autocommit, foreignKeyChecks, clientFoundRows, skipQueryPlanCache, socket, queryTimeout bool
-	sqlSelectLimit, transactionMode, workload, version, versionComment                      bool
+	sqlSelectLimit, transactionMode, workload, version, versionComment, transactionTimeout  bool
 }
 
 func TestRewrites(in *testing.T) {
@@ -594,6 +603,10 @@ func TestRewrites(in *testing.T) {
 		in:           "SELECT @@query_timeout",
 		expected:     "SELECT :__vtquery_timeout as `@@query_timeout`",
 		queryTimeout: true,
+	}, {
+		in:                 "SELECT @@transaction_timeout",
+		expected:           "SELECT :__vttransaction_timeout as `@@transaction_timeout`",
+		transactionTimeout: true,
 	}, {
 		in:             "SELECT @@version_comment",
 		expected:       "SELECT :__vtversion_comment as `@@version_comment`",
@@ -853,6 +866,7 @@ func TestRewrites(in *testing.T) {
 		sessTrackGTID:               true,
 		socket:                      true,
 		queryTimeout:                true,
+		transactionTimeout:          true,
 	}, {
 		in:                          "SHOW GLOBAL VARIABLES",
 		expected:                    "SHOW GLOBAL VARIABLES",
@@ -874,6 +888,7 @@ func TestRewrites(in *testing.T) {
 		sessTrackGTID:               true,
 		socket:                      true,
 		queryTimeout:                true,
+		transactionTimeout:          true,
 	}}
 	parser := NewTestParser()
 	for _, tc := range tests {
@@ -882,7 +897,7 @@ func TestRewrites(in *testing.T) {
 			stmt, known, err := parser.Parse2(tc.in)
 			require.NoError(err)
 			vars := NewReservedVars("v", known)
-			result, err := PrepareAST(
+			result, err := Normalize(
 				stmt,
 				vars,
 				map[string]*querypb.BindVariable{},
@@ -915,6 +930,7 @@ func TestRewrites(in *testing.T) {
 			assert.Equal(tc.transactionMode, result.NeedsSysVar(sysvars.TransactionMode.Name), "should need :__vttransactionMode")
 			assert.Equal(tc.workload, result.NeedsSysVar(sysvars.Workload.Name), "should need :__vtworkload")
 			assert.Equal(tc.queryTimeout, result.NeedsSysVar(sysvars.QueryTimeout.Name), "should need :__vtquery_timeout")
+			assert.Equal(tc.transactionTimeout, result.NeedsSysVar(sysvars.TransactionTimeout.Name), "should need :__vttransaction_timeout")
 			assert.Equal(tc.ddlStrategy, result.NeedsSysVar(sysvars.DDLStrategy.Name), "should need ddlStrategy")
 			assert.Equal(tc.migrationContext, result.NeedsSysVar(sysvars.MigrationContext.Name), "should need migrationContext")
 			assert.Equal(tc.sessionUUID, result.NeedsSysVar(sysvars.SessionUUID.Name), "should need sessionUUID")
@@ -931,16 +947,16 @@ func TestRewrites(in *testing.T) {
 
 type fakeViews struct{}
 
-func (*fakeViews) FindView(name TableName) TableStatement {
+func (*fakeViews) FindView(name TableName) (TableStatement, *TableName) {
 	if name.Name.String() != "user_details" {
-		return nil
+		return nil, nil
 	}
 	parser := NewTestParser()
 	statement, err := parser.Parse("select user.id, user.name, user_extra.salary from user join user_extra where user.id = user_extra.user_id")
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	return statement.(TableStatement)
+	return statement.(TableStatement), nil
 }
 
 func TestRewritesWithSetVarComment(in *testing.T) {
@@ -985,7 +1001,7 @@ func TestRewritesWithSetVarComment(in *testing.T) {
 			stmt, err := parser.Parse(tc.in)
 			require.NoError(err)
 			vars := NewReservedVars("v", nil)
-			result, err := PrepareAST(
+			result, err := Normalize(
 				stmt,
 				vars,
 				map[string]*querypb.BindVariable{},
@@ -1046,7 +1062,7 @@ func TestRewritesSysVar(in *testing.T) {
 			stmt, err := parser.Parse(tc.in)
 			require.NoError(err)
 			vars := NewReservedVars("v", nil)
-			result, err := PrepareAST(
+			result, err := Normalize(
 				stmt,
 				vars,
 				map[string]*querypb.BindVariable{},
@@ -1109,7 +1125,7 @@ func TestRewritesWithDefaultKeyspace(in *testing.T) {
 			stmt, err := parser.Parse(tc.in)
 			require.NoError(err)
 			vars := NewReservedVars("v", nil)
-			result, err := PrepareAST(
+			result, err := Normalize(
 				stmt,
 				vars,
 				map[string]*querypb.BindVariable{},
@@ -1156,8 +1172,8 @@ func BenchmarkNormalize(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	for i := 0; i < b.N; i++ {
-		_, err := PrepareAST(ast, NewReservedVars("", reservedVars), map[string]*querypb.BindVariable{}, true, "ks", 0, "", map[string]string{}, nil, nil)
+	for b.Loop() {
+		_, err := Normalize(ast, NewReservedVars("", reservedVars), map[string]*querypb.BindVariable{}, true, "ks", 0, "", map[string]string{}, nil, nil)
 		require.NoError(b, err)
 	}
 }
@@ -1187,7 +1203,7 @@ func BenchmarkNormalizeTraces(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				for i, query := range parsed {
-					_, err := PrepareAST(query, NewReservedVars("", reservedVars[i]), map[string]*querypb.BindVariable{}, true, "ks", 0, "", map[string]string{}, nil, nil)
+					_, err := Normalize(query, NewReservedVars("", reservedVars[i]), map[string]*querypb.BindVariable{}, true, "ks", 0, "", map[string]string{}, nil, nil)
 					require.NoError(b, err)
 				}
 			}
@@ -1204,10 +1220,9 @@ func BenchmarkNormalizeVTGate(b *testing.B) {
 		queries = queries[:10000]
 	}
 
-	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		for _, sql := range queries {
 			stmt, reservedVars, err := parser.Parse2(sql)
 			if err != nil {
@@ -1222,7 +1237,7 @@ func BenchmarkNormalizeVTGate(b *testing.B) {
 
 			// Normalize if possible and retry.
 			if CanNormalize(stmt) || MustRewriteAST(stmt, false) {
-				result, err := PrepareAST(
+				result, err := Normalize(
 					stmt,
 					NewReservedVars("vtg", reservedVars),
 					bindVars,
@@ -1286,7 +1301,7 @@ func BenchmarkNormalizeTPCCInsert(b *testing.B) {
 	generateInsert := func(rows int) string {
 		var query strings.Builder
 		query.WriteString("INSERT IGNORE INTO customer0 (c_id, c_d_id, c_w_id, c_first, c_middle, c_last, c_street_1, c_street_2, c_city, c_state, c_zip, c_phone, c_since, c_credit, c_credit_lim, c_discount, c_balance, c_ytd_payment, c_payment_cnt, c_delivery_cnt, c_data) values ")
-		for i := 0; i < rows; i++ {
+		for i := range rows {
 			fmt.Fprintf(&query, "(%d, %d, %d, '%s','OE','%s','%s', '%s', '%s', '%s', '%s','%s',NOW(),'%s',50000,%f,-10,10,1,0,'%s' )",
 				rand.Int(), rand.Int(), rand.Int(),
 				"first-"+randString(rand.IntN(10)),
@@ -1307,7 +1322,7 @@ func BenchmarkNormalizeTPCCInsert(b *testing.B) {
 
 	var queries []string
 
-	for i := 0; i < 1024; i++ {
+	for range 1024 {
 		queries = append(queries, generateInsert(4))
 	}
 
@@ -1322,9 +1337,9 @@ JOIN warehouse%d AS w ON c_w_id=w_id
 WHERE w_id = %d
 AND c_d_id = %d
 AND c_id = %d`,
-		`SELECT d_next_o_id, d_tax 
-FROM district%d 
-WHERE d_w_id = %d 
+		`SELECT d_next_o_id, d_tax
+FROM district%d
+WHERE d_w_id = %d
 AND d_id = %d FOR UPDATE`,
 		`UPDATE district%d
 SET d_next_o_id = %d
@@ -1334,58 +1349,58 @@ WHERE d_id = %d AND d_w_id= %d`,
 VALUES (%d,%d,%d,%d,NOW(),%d,%d)`,
 		`INSERT INTO new_orders%d (no_o_id, no_d_id, no_w_id)
 VALUES (%d,%d,%d)`,
-		`SELECT i_price, i_name, i_data 
+		`SELECT i_price, i_name, i_data
 FROM item%d
 WHERE i_id = %d`,
-		`SELECT s_quantity, s_data, s_dist_%s s_dist 
-FROM stock%d  
+		`SELECT s_quantity, s_data, s_dist_%s s_dist
+FROM stock%d
 WHERE s_i_id = %d AND s_w_id= %d FOR UPDATE`,
 		`UPDATE stock%d
 SET s_quantity = %d
-WHERE s_i_id = %d 
+WHERE s_i_id = %d
 AND s_w_id= %d`,
 		`INSERT INTO order_line%d
 (ol_o_id, ol_d_id, ol_w_id, ol_number, ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_dist_info)
 VALUES (%d,%d,%d,%d,%d,%d,%d,%d,'%s')`,
 		`UPDATE warehouse%d
-SET w_ytd = w_ytd + %d 
+SET w_ytd = w_ytd + %d
 WHERE w_id = %d`,
 		`SELECT w_street_1, w_street_2, w_city, w_state, w_zip, w_name
 FROM warehouse%d
 WHERE w_id = %d`,
-		`UPDATE district%d 
-SET d_ytd = d_ytd + %d 
-WHERE d_w_id = %d 
+		`UPDATE district%d
+SET d_ytd = d_ytd + %d
+WHERE d_w_id = %d
 AND d_id= %d`,
-		`SELECT d_street_1, d_street_2, d_city, d_state, d_zip, d_name 
+		`SELECT d_street_1, d_street_2, d_city, d_state, d_zip, d_name
 FROM district%d
-WHERE d_w_id = %d 
+WHERE d_w_id = %d
 AND d_id = %d`,
 		`SELECT count(c_id) namecnt
 FROM customer%d
-WHERE c_w_id = %d 
+WHERE c_w_id = %d
 AND c_d_id= %d
 AND c_last='%s'`,
 		`SELECT c_first, c_middle, c_last, c_street_1,
 c_street_2, c_city, c_state, c_zip, c_phone,
 c_credit, c_credit_lim, c_discount, c_balance, c_ytd_payment, c_since
 FROM customer%d
-WHERE c_w_id = %d 
+WHERE c_w_id = %d
 AND c_d_id= %d
 AND c_id=%d FOR UPDATE`,
 		`SELECT c_data
 FROM customer%d
-WHERE c_w_id = %d 
+WHERE c_w_id = %d
 AND c_d_id=%d
 AND c_id= %d`,
 		`UPDATE customer%d
 SET c_balance=%f, c_ytd_payment=%f, c_data='%s'
-WHERE c_w_id = %d 
+WHERE c_w_id = %d
 AND c_d_id=%d
 AND c_id=%d`,
 		`UPDATE customer%d
 SET c_balance=%f, c_ytd_payment=%f
-WHERE c_w_id = %d 
+WHERE c_w_id = %d
 AND c_d_id=%d
 AND c_id=%d`,
 		`INSERT INTO history%d
@@ -1393,71 +1408,71 @@ AND c_id=%d`,
 VALUES (%d,%d,%d,%d,%d,NOW(),%d,'%s')`,
 		`SELECT count(c_id) namecnt
 FROM customer%d
-WHERE c_w_id = %d 
+WHERE c_w_id = %d
 AND c_d_id= %d
 AND c_last='%s'`,
 		`SELECT c_balance, c_first, c_middle, c_id
 FROM customer%d
-WHERE c_w_id = %d 
+WHERE c_w_id = %d
 AND c_d_id= %d
 AND c_last='%s' ORDER BY c_first`,
 		`SELECT c_balance, c_first, c_middle, c_last
 FROM customer%d
-WHERE c_w_id = %d 
+WHERE c_w_id = %d
 AND c_d_id=%d
 AND c_id=%d`,
 		`SELECT o_id, o_carrier_id, o_entry_d
-FROM orders%d 
-WHERE o_w_id = %d 
-AND o_d_id = %d 
-AND o_c_id = %d 
+FROM orders%d
+WHERE o_w_id = %d
+AND o_d_id = %d
+AND o_c_id = %d
 ORDER BY o_id DESC`,
 		`SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d
 FROM order_line%d WHERE ol_w_id = %d AND ol_d_id = %d  AND ol_o_id = %d`,
 		`SELECT no_o_id
-FROM new_orders%d 
-WHERE no_d_id = %d 
-AND no_w_id = %d 
+FROM new_orders%d
+WHERE no_d_id = %d
+AND no_w_id = %d
 ORDER BY no_o_id ASC LIMIT 1 FOR UPDATE`,
 		`DELETE FROM new_orders%d
-WHERE no_o_id = %d 
-AND no_d_id = %d  
+WHERE no_o_id = %d
+AND no_d_id = %d
 AND no_w_id = %d`,
 		`SELECT o_c_id
-FROM orders%d 
-WHERE o_id = %d 
-AND o_d_id = %d 
+FROM orders%d
+WHERE o_id = %d
+AND o_d_id = %d
 AND o_w_id = %d`,
-		`UPDATE orders%d 
+		`UPDATE orders%d
 SET o_carrier_id = %d
-WHERE o_id = %d 
-AND o_d_id = %d 
+WHERE o_id = %d
+AND o_d_id = %d
 AND o_w_id = %d`,
-		`UPDATE order_line%d 
+		`UPDATE order_line%d
 SET ol_delivery_d = NOW()
-WHERE ol_o_id = %d 
-AND ol_d_id = %d 
+WHERE ol_o_id = %d
+AND ol_d_id = %d
 AND ol_w_id = %d`,
 		`SELECT SUM(ol_amount) sm
-FROM order_line%d 
-WHERE ol_o_id = %d 
-AND ol_d_id = %d 
+FROM order_line%d
+WHERE ol_o_id = %d
+AND ol_d_id = %d
 AND ol_w_id = %d`,
-		`UPDATE customer%d 
+		`UPDATE customer%d
 SET c_balance = c_balance + %f,
 c_delivery_cnt = c_delivery_cnt + 1
-WHERE c_id = %d 
-AND c_d_id = %d 
+WHERE c_id = %d
+AND c_d_id = %d
 AND c_w_id = %d`,
-		`SELECT d_next_o_id 
+		`SELECT d_next_o_id
 FROM district%d
 WHERE d_id = %d AND d_w_id= %d`,
 		`SELECT COUNT(DISTINCT(s.s_i_id))
 FROM stock%d AS s
-JOIN order_line%d AS ol ON ol.ol_w_id=s.s_w_id AND ol.ol_i_id=s.s_i_id			
-WHERE ol.ol_w_id = %d 
+JOIN order_line%d AS ol ON ol.ol_w_id=s.s_w_id AND ol.ol_i_id=s.s_i_id
+WHERE ol.ol_w_id = %d
 AND ol.ol_d_id = %d
-AND ol.ol_o_id < %d 
+AND ol.ol_o_id < %d
 AND ol.ol_o_id >= %d
 AND s.s_w_id= %d
 AND s.s_quantity < %d `,
@@ -1468,7 +1483,7 @@ AND ol_o_id < %d AND ol_o_id >= %d`,
 WHERE s_w_id = %d AND s_i_id = %d
 AND s_quantity < %d`,
 		`SELECT min(no_o_id) mo
-FROM new_orders%d 
+FROM new_orders%d
 WHERE no_w_id = %d AND no_d_id = %d`,
 		`SELECT o_id FROM orders%d o, (SELECT o_c_id,o_w_id,o_d_id,count(distinct o_id) FROM orders%d WHERE o_w_id=%d AND o_d_id=%d AND o_id > 2100 AND o_id < %d GROUP BY o_c_id,o_d_id,o_w_id having count( distinct o_id) > 1 limit 1) t WHERE t.o_w_id=o.o_w_id and t.o_d_id=o.o_d_id and t.o_c_id=o.o_c_id limit 1 `,
 		`DELETE FROM order_line%d where ol_w_id=%d AND ol_d_id=%d AND ol_o_id=%d`,
@@ -1493,7 +1508,7 @@ WHERE no_w_id = %d AND no_d_id = %d`,
 	var queries []string
 
 	for _, tmpl := range templates {
-		for i := 0; i < 128; i++ {
+		for range 128 {
 			queries = append(queries, re.ReplaceAllStringFunc(tmpl, repl))
 		}
 	}
@@ -1514,7 +1529,7 @@ func benchmarkNormalization(b *testing.B, sqls []string) {
 			}
 
 			reservedVars := NewReservedVars("vtg", reserved)
-			_, err = PrepareAST(
+			_, err = Normalize(
 				stmt,
 				reservedVars,
 				make(map[string]*querypb.BindVariable),

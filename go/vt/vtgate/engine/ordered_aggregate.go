@@ -79,21 +79,6 @@ func (gbp GroupByParams) String() string {
 	return out
 }
 
-// RouteType returns a description of the query routing type used by the primitive
-func (oa *OrderedAggregate) RouteType() string {
-	return oa.Input.RouteType()
-}
-
-// GetKeyspaceName specifies the Keyspace that this primitive routes to.
-func (oa *OrderedAggregate) GetKeyspaceName() string {
-	return oa.Input.GetKeyspaceName()
-}
-
-// GetTableName specifies the table that this primitive routes to.
-func (oa *OrderedAggregate) GetTableName() string {
-	return oa.Input.GetTableName()
-}
-
 // TryExecute is a Primitive function.
 func (oa *OrderedAggregate) TryExecute(ctx context.Context, vcursor VCursor, bindVars map[string]*querypb.BindVariable, _ bool) (*sqltypes.Result, error) {
 	qr, err := oa.execute(ctx, vcursor, bindVars)
@@ -103,6 +88,7 @@ func (oa *OrderedAggregate) TryExecute(ctx context.Context, vcursor VCursor, bin
 	return qr.Truncate(oa.TruncateColumnCount), nil
 }
 
+// executeGroupBy is used when the plan contains grouping but not aggregations
 func (oa *OrderedAggregate) executeGroupBy(result *sqltypes.Result) (*sqltypes.Result, error) {
 	if len(result.Rows) < 1 {
 		return result, nil
@@ -139,6 +125,7 @@ func (oa *OrderedAggregate) execute(ctx context.Context, vcursor VCursor, bindVa
 		bindVars,
 		true, /*wantFields - we need the input fields types to correctly calculate the output types*/
 	)
+	env := evalengine.NewExpressionEnv(ctx, bindVars, vcursor)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +133,7 @@ func (oa *OrderedAggregate) execute(ctx context.Context, vcursor VCursor, bindVa
 		return oa.executeGroupBy(result)
 	}
 
-	agg, fields, err := newAggregation(result.Fields, oa.Aggregates)
+	agg, fields, err := newAggregation(result.Fields, oa.Aggregates, env, vcursor.ConnCollation())
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +153,11 @@ func (oa *OrderedAggregate) execute(ctx context.Context, vcursor VCursor, bindVa
 		}
 
 		if nextGroup {
-			out.Rows = append(out.Rows, agg.finish())
+			values, err := agg.finish()
+			if err != nil {
+				return nil, err
+			}
+			out.Rows = append(out.Rows, values)
 			agg.reset()
 		}
 
@@ -176,7 +167,11 @@ func (oa *OrderedAggregate) execute(ctx context.Context, vcursor VCursor, bindVa
 	}
 
 	if currentKey != nil {
-		out.Rows = append(out.Rows, agg.finish())
+		values, err := agg.finish()
+		if err != nil {
+			return nil, err
+		}
+		out.Rows = append(out.Rows, values)
 	}
 
 	return out, nil
@@ -238,12 +233,13 @@ func (oa *OrderedAggregate) TryStreamExecute(ctx context.Context, vcursor VCurso
 	if len(oa.Aggregates) == 0 {
 		return oa.executeStreamGroupBy(ctx, vcursor, bindVars, callback)
 	}
+	env := evalengine.NewExpressionEnv(ctx, bindVars, vcursor)
 
 	cb := func(qr *sqltypes.Result) error {
 		return callback(qr.Truncate(oa.TruncateColumnCount))
 	}
 
-	var agg aggregationState
+	var agg *aggregationState
 	var fields []*querypb.Field
 	var currentKey []sqltypes.Value
 
@@ -251,7 +247,7 @@ func (oa *OrderedAggregate) TryStreamExecute(ctx context.Context, vcursor VCurso
 		var err error
 
 		if agg == nil && len(qr.Fields) != 0 {
-			agg, fields, err = newAggregation(qr.Fields, oa.Aggregates)
+			agg, fields, err = newAggregation(qr.Fields, oa.Aggregates, env, vcursor.ConnCollation())
 			if err != nil {
 				return err
 			}
@@ -271,7 +267,11 @@ func (oa *OrderedAggregate) TryStreamExecute(ctx context.Context, vcursor VCurso
 
 			if nextGroup {
 				// this is a new grouping. let's yield the old one, and start a new
-				if err := cb(&sqltypes.Result{Rows: [][]sqltypes.Value{agg.finish()}}); err != nil {
+				values, err := agg.finish()
+				if err != nil {
+					return err
+				}
+				if err := cb(&sqltypes.Result{Rows: [][]sqltypes.Value{values}}); err != nil {
 					return err
 				}
 
@@ -292,7 +292,11 @@ func (oa *OrderedAggregate) TryStreamExecute(ctx context.Context, vcursor VCurso
 	}
 
 	if currentKey != nil {
-		if err := cb(&sqltypes.Result{Rows: [][]sqltypes.Value{agg.finish()}}); err != nil {
+		values, err := agg.finish()
+		if err != nil {
+			return err
+		}
+		if err := cb(&sqltypes.Result{Rows: [][]sqltypes.Value{values}}); err != nil {
 			return err
 		}
 	}
@@ -305,8 +309,8 @@ func (oa *OrderedAggregate) GetFields(ctx context.Context, vcursor VCursor, bind
 	if err != nil {
 		return nil, err
 	}
-
-	_, fields, err := newAggregation(qr.Fields, oa.Aggregates)
+	env := evalengine.NewExpressionEnv(ctx, bindVars, vcursor)
+	_, fields, err := newAggregation(qr.Fields, oa.Aggregates, env, vcursor.ConnCollation())
 	if err != nil {
 		return nil, err
 	}
@@ -355,6 +359,7 @@ func (oa *OrderedAggregate) nextGroupBy(currentKey, nextRow []sqltypes.Value) (n
 	}
 	return currentKey, false, nil
 }
+
 func aggregateParamsToString(in any) string {
 	return in.(*AggregateParams).String()
 }

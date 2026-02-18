@@ -17,7 +17,6 @@ limitations under the License.
 package grpc_api
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,8 +28,7 @@ import (
 
 // TestEffectiveCallerIDWithAccess verifies that an authenticated gRPC static user with an effectiveCallerID that has ACL access can execute queries
 func TestEffectiveCallerIDWithAccess(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	vtgateConn, err := cluster.DialVTGate(ctx, t.Name(), vtgateGrpcAddress, "some_other_user", "test_password")
 	require.NoError(t, err)
@@ -39,14 +37,13 @@ func TestEffectiveCallerIDWithAccess(t *testing.T) {
 	session := vtgateConn.Session(keyspaceName+"@primary", nil)
 	query := "SELECT id FROM test_table"
 	ctx = callerid.NewContext(ctx, callerid.NewEffectiveCallerID("user_with_access", "", ""), nil)
-	_, err = session.Execute(ctx, query, nil)
+	_, err = session.Execute(ctx, query, nil, false)
 	assert.NoError(t, err)
 }
 
 // TestEffectiveCallerIDWithNoAccess verifies that an authenticated gRPC static user without an effectiveCallerID that has ACL access cannot execute queries
 func TestEffectiveCallerIDWithNoAccess(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	vtgateConn, err := cluster.DialVTGate(ctx, t.Name(), vtgateGrpcAddress, "another_unrelated_user", "test_password")
 	require.NoError(t, err)
@@ -55,7 +52,7 @@ func TestEffectiveCallerIDWithNoAccess(t *testing.T) {
 	session := vtgateConn.Session(keyspaceName+"@primary", nil)
 	query := "SELECT id FROM test_table"
 	ctx = callerid.NewContext(ctx, callerid.NewEffectiveCallerID("user_no_access", "", ""), nil)
-	_, err = session.Execute(ctx, query, nil)
+	_, err = session.Execute(ctx, query, nil, false)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "Select command denied to user")
 	assert.ErrorContains(t, err, "for table 'test_table' (ACL check error)")
@@ -63,8 +60,7 @@ func TestEffectiveCallerIDWithNoAccess(t *testing.T) {
 
 // TestAuthenticatedUserWithAccess verifies that an authenticated gRPC static user with ACL access can execute queries
 func TestAuthenticatedUserWithAccess(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	vtgateConn, err := cluster.DialVTGate(ctx, t.Name(), vtgateGrpcAddress, "user_with_access", "test_password")
 	require.NoError(t, err)
@@ -72,14 +68,13 @@ func TestAuthenticatedUserWithAccess(t *testing.T) {
 
 	session := vtgateConn.Session(keyspaceName+"@primary", nil)
 	query := "SELECT id FROM test_table"
-	_, err = session.Execute(ctx, query, nil)
+	_, err = session.Execute(ctx, query, nil, false)
 	assert.NoError(t, err)
 }
 
 // TestAuthenticatedUserNoAccess verifies that an authenticated gRPC static user with no ACL access cannot execute queries
 func TestAuthenticatedUserNoAccess(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	vtgateConn, err := cluster.DialVTGate(ctx, t.Name(), vtgateGrpcAddress, "user_no_access", "test_password")
 	require.NoError(t, err)
@@ -87,7 +82,7 @@ func TestAuthenticatedUserNoAccess(t *testing.T) {
 
 	session := vtgateConn.Session(keyspaceName+"@primary", nil)
 	query := "SELECT id FROM test_table"
-	_, err = session.Execute(ctx, query, nil)
+	_, err = session.Execute(ctx, query, nil, false)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "Select command denied to user")
 	assert.ErrorContains(t, err, "for table 'test_table' (ACL check error)")
@@ -95,8 +90,7 @@ func TestAuthenticatedUserNoAccess(t *testing.T) {
 
 // TestUnauthenticatedUser verifies that an unauthenticated gRPC user cannot execute queries
 func TestUnauthenticatedUser(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	vtgateConn, err := cluster.DialVTGate(ctx, t.Name(), vtgateGrpcAddress, "", "")
 	require.NoError(t, err)
@@ -104,7 +98,7 @@ func TestUnauthenticatedUser(t *testing.T) {
 
 	session := vtgateConn.Session(keyspaceName+"@primary", nil)
 	query := "SELECT id FROM test_table"
-	_, err = session.Execute(ctx, query, nil)
+	_, err = session.Execute(ctx, query, nil, false)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "invalid credentials")
 }

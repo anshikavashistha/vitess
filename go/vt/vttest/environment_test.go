@@ -29,11 +29,11 @@ func TestVtcomboArguments(t *testing.T) {
 	env := &LocalTestEnv{}
 	args := env.VtcomboArguments()
 
-	t.Run("service_map flag", func(t *testing.T) {
-		require.Contains(t, args, "--service_map", "vttest.LocalTestEnv must provide `--service_map` flag to vtcombo")
+	t.Run("service-map flag", func(t *testing.T) {
+		require.Contains(t, args, "--service-map", "vttest.LocalTestEnv must provide `--service-map` flag to vtcombo")
 
-		x := sort.SearchStrings(args, "--service_map")
-		require.Less(t, x+1, len(args), "--service_map vtcombo flag (idx = %d) must take an argument. full arg list: %v", x, args)
+		x := sort.SearchStrings(args, "--service-map")
+		require.Less(t, x+1, len(args), "--service-map vtcombo flag (idx = %d) must take an argument. full arg list: %v", x, args)
 
 		expectedServiceList := []string{
 			"grpc-vtgateservice",
@@ -41,6 +41,18 @@ func TestVtcomboArguments(t *testing.T) {
 			"grpc-vtctld",
 		}
 		serviceMapList := strings.Split(args[x+1], ",")
-		assert.ElementsMatch(t, expectedServiceList, serviceMapList, "--service_map list does not contain expected vtcombo services")
+		assert.ElementsMatch(t, expectedServiceList, serviceMapList, "--service-map list does not contain expected vtcombo services")
 	})
+}
+
+func TestVtcomboRandomPort(t *testing.T) {
+	require.Empty(t, usedRandomPorts)
+	port := randomPort()
+	// 10000-30000 is the range the rand call in randomPorts() can return
+	require.GreaterOrEqual(t, port, 10000)
+	require.LessOrEqual(t, port, 30000)
+	require.Len(t, usedRandomPorts, 6)
+	require.Contains(t, usedRandomPorts, port)
+	require.NotEqual(t, port, randomPort())
+	require.Len(t, usedRandomPorts, 12)
 }

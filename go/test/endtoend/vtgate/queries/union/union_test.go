@@ -79,7 +79,6 @@ func TestUnionDistinct(t *testing.T) {
 				mcmp.Exec(`select curdate() from t1 union select id1 from t1`)
 			}
 		})
-
 	}
 }
 
@@ -111,7 +110,7 @@ func TestUnionAll(t *testing.T) {
 			// this test is quite good at uncovering races in the Concatenate engine primitive. make it run many times
 			// see: https://github.com/vitessio/vitess/issues/15434
 			if utils.BinaryIsAtLeastAtVersion(20, "vtgate") {
-				for i := 0; i < 100; i++ {
+				for range 100 {
 					// union all between two select unique in tables
 					mcmp.AssertMatchesNoOrder("select id1 from t1 where id1 in (1, 2, 3, 4, 5, 6, 7, 8) union all select id1 from t1 where id1 in (1, 2, 3, 4, 5, 6, 7, 8)",
 						"[[INT64(1)] [INT64(2)] [INT64(1)] [INT64(2)]]")
@@ -122,8 +121,25 @@ func TestUnionAll(t *testing.T) {
 			mcmp.AssertMatchesNoOrder("select id1, id2 from t1 where id1 = 1 union all select id3,id4 from t2 where id3 = 3 union all select id1, id2 from t1 where id1 = 2 union all select id3,id4 from t2 where id3 = 4",
 				"[[INT64(1) INT64(1)] [INT64(2) INT64(2)] [INT64(3) INT64(3)] [INT64(4) INT64(4)]]")
 		})
-
 	}
+	mcmp.Run("union push down", func(mcmp *utils.MySQLCompare) {
+		mcmp.Exec(`
+select sum(case when col = 1 then 1 else 0 end) 
+from (
+	select id1 as col from t1 
+	union all 
+	select id3 as col from t2
+) as t`)
+		mcmp.Exec(`
+select sum(id1+id2+foo) 
+from (
+	select id1, id2, id1+id2 as foo from t1 
+	union all 
+	select id3, id4, id4*id4 from t2
+	union all 
+	select id3, id4, id1+id4 from t1 join t2 on id3 + 1 = id1
+) as t`)
+	})
 }
 
 func TestUnion(t *testing.T) {

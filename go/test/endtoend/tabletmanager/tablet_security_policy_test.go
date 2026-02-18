@@ -16,7 +16,6 @@ limitations under the License.
 package tabletmanager
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,18 +25,19 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"vitess.io/vitess/go/test/endtoend/cluster"
+	"vitess.io/vitess/go/vt/utils"
 )
 
 func TestFallbackSecurityPolicy(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	mTablet := clusterInstance.NewVttabletInstance("replica", 0, "")
 
 	// Start Mysql Processes
 	err := cluster.StartMySQL(ctx, mTablet, username, clusterInstance.TmpDirectory)
 	require.NoError(t, err)
 
-	// Requesting an unregistered security_policy should fallback to deny-all.
-	clusterInstance.VtTabletExtraArgs = []string{"--security_policy", "bogus"}
+	// Requesting an unregistered security-policy should fallback to deny-all.
+	clusterInstance.VtTabletExtraArgs = []string{utils.GetFlagVariantForTests("--security-policy"), "bogus"}
 	err = clusterInstance.StartVttablet(mTablet, false, "SERVING", false, cell, keyspaceName, hostname, shardName)
 	require.NoError(t, err)
 
@@ -83,15 +83,15 @@ func assertAllowedURLTest(t *testing.T, url string) {
 }
 
 func TestDenyAllSecurityPolicy(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	mTablet := clusterInstance.NewVttabletInstance("replica", 0, "")
 
 	// Start Mysql Processes
 	err := cluster.StartMySQL(ctx, mTablet, username, clusterInstance.TmpDirectory)
 	require.NoError(t, err)
 
-	// Requesting a deny-all security_policy.
-	clusterInstance.VtTabletExtraArgs = []string{"--security_policy", "deny-all"}
+	// Requesting a deny-all security-policy.
+	clusterInstance.VtTabletExtraArgs = []string{utils.GetFlagVariantForTests("--security-policy"), "deny-all"}
 	err = clusterInstance.StartVttablet(mTablet, false, "SERVING", false, cell, keyspaceName, hostname, shardName)
 	require.NoError(t, err)
 
@@ -114,15 +114,15 @@ func TestDenyAllSecurityPolicy(t *testing.T) {
 }
 
 func TestReadOnlySecurityPolicy(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	mTablet := clusterInstance.NewVttabletInstance("replica", 0, "")
 
 	// Start Mysql Processes
 	err := cluster.StartMySQL(ctx, mTablet, username, clusterInstance.TmpDirectory)
 	require.NoError(t, err)
 
-	// Requesting a read-only security_policy.
-	clusterInstance.VtTabletExtraArgs = []string{"--security_policy", "read-only"}
+	// Requesting a read-only security-policy.
+	clusterInstance.VtTabletExtraArgs = []string{utils.GetFlagVariantForTests("--security-policy"), "read-only"}
 	err = clusterInstance.StartVttablet(mTablet, false, "SERVING", false, cell, keyspaceName, hostname, shardName)
 	require.NoError(t, err)
 

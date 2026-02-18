@@ -18,7 +18,6 @@ package engine
 
 import (
 	"context"
-	"fmt"
 	"io"
 
 	"vitess.io/vitess/go/vt/vterrors"
@@ -39,25 +38,10 @@ type VStream struct {
 	noInputs
 
 	Keyspace          *vindexes.Keyspace
-	TargetDestination key.Destination
+	TargetDestination key.ShardDestination
 	TableName         string
 	Position          string
 	Limit             int
-}
-
-// RouteType implements the Primitive interface
-func (v *VStream) RouteType() string {
-	return "VStream"
-}
-
-// GetKeyspaceName implements the Primitive interface
-func (v *VStream) GetKeyspaceName() string {
-	return v.Keyspace.Name
-}
-
-// GetTableName implements the Primitive interface
-func (v *VStream) GetTableName() string {
-	return v.TableName
 }
 
 // TryExecute implements the Primitive interface
@@ -67,14 +51,14 @@ func (v *VStream) TryExecute(ctx context.Context, vcursor VCursor, bindVars map[
 
 // TryStreamExecute implements the Primitive interface
 func (v *VStream) TryStreamExecute(ctx context.Context, vcursor VCursor, bindVars map[string]*querypb.BindVariable, wantfields bool, callback func(*sqltypes.Result) error) error {
-	rss, _, err := vcursor.ResolveDestinations(ctx, v.Keyspace.Name, nil, []key.Destination{v.TargetDestination})
+	rss, _, err := vcursor.ResolveDestinations(ctx, v.Keyspace.Name, nil, []key.ShardDestination{v.TargetDestination})
 	if err != nil {
 		return err
 	}
 	filter := &binlogdatapb.Filter{
 		Rules: []*binlogdatapb.Rule{{
 			Match:  v.TableName,
-			Filter: fmt.Sprintf("select * from %s", v.TableName),
+			Filter: "select * from " + v.TableName,
 		}},
 	}
 	var lastFields []*querypb.Field

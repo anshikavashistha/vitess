@@ -51,6 +51,7 @@ import (
 	"vitess.io/vitess/go/timer"
 	"vitess.io/vitess/go/vt/log"
 	"vitess.io/vitess/go/vt/schema"
+	"vitess.io/vitess/go/vt/utils"
 )
 
 type testcase struct {
@@ -401,7 +402,7 @@ func mysqlParams() *mysql.ConnParams {
 	evaluatedMysqlParams = &mysql.ConnParams{
 		Uname:      "vt_dba",
 		UnixSocket: path.Join(os.Getenv("VTDATAROOT"), fmt.Sprintf("/vt_%010d", primaryTablet.TabletUID), "/mysql.sock"),
-		DbName:     fmt.Sprintf("vt_%s", keyspaceName),
+		DbName:     "vt_" + keyspaceName,
 	}
 	return evaluatedMysqlParams
 }
@@ -416,27 +417,27 @@ func TestMain(m *testing.M) {
 		defer clusterInstance.Teardown()
 
 		if _, err := os.Stat(schemaChangeDirectory); os.IsNotExist(err) {
-			_ = os.Mkdir(schemaChangeDirectory, 0700)
+			_ = os.Mkdir(schemaChangeDirectory, 0o700)
 		}
 
 		clusterInstance.VtctldExtraArgs = []string{
-			"--schema_change_dir", schemaChangeDirectory,
-			"--schema_change_controller", "local",
-			"--schema_change_check_interval", "1s",
+			"--schema-change-dir", schemaChangeDirectory,
+			"--schema-change-controller", "local",
+			"--schema-change-check-interval", "1s",
 		}
 
 		// --vstream_packet_size is set to a small value that ensures we get multiple stream iterations,
 		// thereby examining lastPK on vcopier side. We will be iterating tables using non-PK order throughout
 		// this test suite, and so the low setting ensures we hit the more interesting code paths.
 		clusterInstance.VtTabletExtraArgs = []string{
-			"--heartbeat_interval", "250ms",
-			"--heartbeat_on_demand_duration", "5s",
-			"--migration_check_interval", "5s",
-			"--vstream_packet_size", "4096", // Keep this value small and below 10k to ensure multilple vstream iterations
-			"--watch_replication_stream",
+			utils.GetFlagVariantForTests("--heartbeat-interval"), "250ms",
+			utils.GetFlagVariantForTests("--heartbeat-on-demand-duration"), "5s",
+			utils.GetFlagVariantForTests("--migration-check-interval"), "5s",
+			"--vstream-packet-size", "4096", // Keep this value small and below 10k to ensure multilple vstream iterations
+			utils.GetFlagVariantForTests("--watch-replication-stream"),
 		}
 		clusterInstance.VtGateExtraArgs = []string{
-			"--ddl_strategy", "online",
+			utils.GetFlagVariantForTests("--ddl-strategy"), "online",
 		}
 
 		if err := clusterInstance.StartTopo(); err != nil {
@@ -449,7 +450,7 @@ func TestMain(m *testing.M) {
 		}
 
 		// No need for replicas in this stress test
-		if err := clusterInstance.StartKeyspace(*keyspace, []string{"1"}, 0, false); err != nil {
+		if err := clusterInstance.StartKeyspace(*keyspace, []string{"1"}, 0, false, clusterInstance.Cell); err != nil {
 			return 1, err
 		}
 
@@ -473,11 +474,9 @@ func TestMain(m *testing.M) {
 	} else {
 		os.Exit(exitcode)
 	}
-
 }
 
 func TestVreplStressSchemaChanges(t *testing.T) {
-
 	shards = clusterInstance.Keyspaces[0].Shards
 	require.Equal(t, 1, len(shards))
 	require.Equal(t, 1, len(shards[0].Vttablets))
@@ -519,11 +518,9 @@ func TestVreplStressSchemaChanges(t *testing.T) {
 
 				ctx, cancel := context.WithCancel(context.Background())
 				var wg sync.WaitGroup
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					runMultipleConnections(ctx, t, testcase.autoIncInsert)
-				}()
+				})
 				uuid := testOnlineDDLStatement(t, fullStatement, onlineDDLStrategy, "vtgate", hintText)
 				expectStatus := schema.OnlineDDLStatusComplete
 				if testcase.expectFailure {
@@ -676,7 +673,7 @@ func generateDelete(t *testing.T, conn *mysql.Conn) error {
 }
 
 func runSingleConnection(ctx context.Context, t *testing.T, autoIncInsert bool, done *int64) {
-	log.Infof("Running single connection")
+	log.Info("Running single connection")
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.Nil(t, err)
 	defer conn.Close()
@@ -692,7 +689,7 @@ func runSingleConnection(ctx context.Context, t *testing.T, autoIncInsert bool, 
 	defer periodicRest.Stop()
 	for {
 		if atomic.LoadInt64(done) == 1 {
-			log.Infof("Terminating single connection")
+			log.Info("Terminating single connection")
 			return
 		}
 		switch rand.Int32N(3) {
@@ -733,28 +730,26 @@ func runSingleConnection(ctx context.Context, t *testing.T, autoIncInsert bool, 
 }
 
 func runMultipleConnections(ctx context.Context, t *testing.T, autoIncInsert bool) {
-	log.Infof("Running multiple connections")
+	log.Info("Running multiple connections")
 	var done int64
 	var wg sync.WaitGroup
-	for i := 0; i < maxConcurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range maxConcurrency {
+		wg.Go(func() {
 			runSingleConnection(ctx, t, autoIncInsert, &done)
-		}()
+		})
 	}
 	<-ctx.Done()
 	atomic.StoreInt64(&done, 1)
-	log.Infof("Running multiple connections: done")
+	log.Info("Running multiple connections: done")
 	wg.Wait()
-	log.Infof("All connections cancelled")
+	log.Info("All connections cancelled")
 }
 
 func initTable(t *testing.T) {
-	log.Infof("initTable begin")
-	defer log.Infof("initTable complete")
+	log.Info("initTable begin")
+	defer log.Info("initTable complete")
 
-	ctx := context.Background()
+	ctx := t.Context()
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.Nil(t, err)
 	defer conn.Close()
@@ -764,13 +759,13 @@ func initTable(t *testing.T) {
 	_, err = conn.ExecuteFetch(truncateStatement, 1000, true)
 	require.Nil(t, err)
 
-	for i := 0; i < maxTableRows/2; i++ {
+	for range maxTableRows / 2 {
 		generateInsert(t, conn, false)
 	}
-	for i := 0; i < maxTableRows/4; i++ {
+	for range maxTableRows / 4 {
 		generateUpdate(t, conn)
 	}
-	for i := 0; i < maxTableRows/4; i++ {
+	for range maxTableRows / 4 {
 		generateDelete(t, conn)
 	}
 	{

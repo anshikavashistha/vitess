@@ -29,6 +29,7 @@ import (
 	"vitess.io/vitess/go/test/endtoend/cluster"
 	"vitess.io/vitess/go/test/endtoend/utils"
 	"vitess.io/vitess/go/vt/sqlparser"
+	vtutils "vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vtgate/engine"
 	"vitess.io/vitess/go/vt/vtgate/planbuilder"
 )
@@ -66,7 +67,7 @@ func TestMain(m *testing.M) {
 			SchemaSQL: uSQL,
 			VSchema:   mainVs,
 		}
-		err = clusterInstance.StartUnshardedKeyspace(*uKeyspace, 0, false)
+		err = clusterInstance.StartUnshardedKeyspace(*uKeyspace, 0, false, clusterInstance.Cell)
 		if err != nil {
 			fmt.Println(err.Error())
 			return 1
@@ -78,7 +79,7 @@ func TestMain(m *testing.M) {
 			SchemaSQL: sSQL,
 			VSchema:   userVs,
 		}
-		err = clusterInstance.StartKeyspace(*skeyspace, []string{"-80", "80-"}, 0, false)
+		err = clusterInstance.StartKeyspace(*skeyspace, []string{"-80", "80-"}, 0, false, clusterInstance.Cell)
 		if err != nil {
 			fmt.Println(err.Error())
 			return 1
@@ -86,8 +87,8 @@ func TestMain(m *testing.M) {
 
 		// TODO: (@GuptaManan100/@systay): Also run the tests with normalizer on.
 		clusterInstance.VtGateExtraArgs = append(clusterInstance.VtGateExtraArgs,
-			"--normalize_queries=false",
-			"--schema_change_signal=true",
+			vtutils.GetFlagVariantForTests("--normalize-queries")+"=false",
+			vtutils.GetFlagVariantForTests("--schema-change-signal")+"=true",
 		)
 
 		// Start vtgate

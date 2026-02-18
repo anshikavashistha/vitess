@@ -20,6 +20,8 @@ import (
 	"context"
 	"sync"
 
+	"vitess.io/vitess/go/vt/vtgate/evalengine"
+
 	"vitess.io/vitess/go/sqltypes"
 	querypb "vitess.io/vitess/go/vt/proto/query"
 )
@@ -41,30 +43,15 @@ type ScalarAggregate struct {
 	Input Primitive
 }
 
-// RouteType implements the Primitive interface
-func (sa *ScalarAggregate) RouteType() string {
-	return sa.Input.RouteType()
-}
-
-// GetKeyspaceName implements the Primitive interface
-func (sa *ScalarAggregate) GetKeyspaceName() string {
-	return sa.Input.GetKeyspaceName()
-
-}
-
-// GetTableName implements the Primitive interface
-func (sa *ScalarAggregate) GetTableName() string {
-	return sa.Input.GetTableName()
-}
-
 // GetFields implements the Primitive interface
 func (sa *ScalarAggregate) GetFields(ctx context.Context, vcursor VCursor, bindVars map[string]*querypb.BindVariable) (*sqltypes.Result, error) {
 	qr, err := sa.Input.GetFields(ctx, vcursor, bindVars)
 	if err != nil {
 		return nil, err
 	}
+	env := evalengine.NewExpressionEnv(ctx, bindVars, vcursor)
 
-	_, fields, err := newAggregation(qr.Fields, sa.Aggregates)
+	_, fields, err := newAggregation(qr.Fields, sa.Aggregates, env, vcursor.ConnCollation())
 	if err != nil {
 		return nil, err
 	}
@@ -84,8 +71,9 @@ func (sa *ScalarAggregate) TryExecute(ctx context.Context, vcursor VCursor, bind
 	if err != nil {
 		return nil, err
 	}
+	env := evalengine.NewExpressionEnv(ctx, bindVars, vcursor)
 
-	agg, fields, err := newAggregation(result.Fields, sa.Aggregates)
+	agg, fields, err := newAggregation(result.Fields, sa.Aggregates, env, vcursor.ConnCollation())
 	if err != nil {
 		return nil, err
 	}
@@ -96,9 +84,13 @@ func (sa *ScalarAggregate) TryExecute(ctx context.Context, vcursor VCursor, bind
 		}
 	}
 
+	values, err := agg.finish()
+	if err != nil {
+		return nil, err
+	}
 	out := &sqltypes.Result{
 		Fields: fields,
-		Rows:   [][]sqltypes.Value{agg.finish()},
+		Rows:   [][]sqltypes.Value{values},
 	}
 	return out.Truncate(sa.TruncateColumnCount), nil
 }
@@ -108,9 +100,10 @@ func (sa *ScalarAggregate) TryStreamExecute(ctx context.Context, vcursor VCursor
 	cb := func(qr *sqltypes.Result) error {
 		return callback(qr.Truncate(sa.TruncateColumnCount))
 	}
+	env := evalengine.NewExpressionEnv(ctx, bindVars, vcursor)
 
 	var mu sync.Mutex
-	var agg aggregationState
+	var agg *aggregationState
 	var fields []*querypb.Field
 	fieldsSent := !wantfields
 
@@ -123,7 +116,7 @@ func (sa *ScalarAggregate) TryStreamExecute(ctx context.Context, vcursor VCursor
 
 		if agg == nil && len(result.Fields) != 0 {
 			var err error
-			agg, fields, err = newAggregation(result.Fields, sa.Aggregates)
+			agg, fields, err = newAggregation(result.Fields, sa.Aggregates, env, vcursor.ConnCollation())
 			if err != nil {
 				return err
 			}
@@ -146,7 +139,11 @@ func (sa *ScalarAggregate) TryStreamExecute(ctx context.Context, vcursor VCursor
 		return err
 	}
 
-	return cb(&sqltypes.Result{Rows: [][]sqltypes.Value{agg.finish()}})
+	values, err := agg.finish()
+	if err != nil {
+		return err
+	}
+	return cb(&sqltypes.Result{Rows: [][]sqltypes.Value{values}})
 }
 
 // Inputs implements the Primitive interface
@@ -168,5 +165,4 @@ func (sa *ScalarAggregate) description() PrimitiveDescription {
 		Variant:      "Scalar",
 		Other:        other,
 	}
-
 }

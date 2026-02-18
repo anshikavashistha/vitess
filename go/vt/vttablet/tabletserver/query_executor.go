@@ -40,6 +40,7 @@ import (
 	"vitess.io/vitess/go/vt/schema"
 	"vitess.io/vitess/go/vt/sqlparser"
 	"vitess.io/vitess/go/vt/tableacl"
+	"vitess.io/vitess/go/vt/tableacl/acl"
 	"vitess.io/vitess/go/vt/vterrors"
 	"vitess.io/vitess/go/vt/vtgate/evalengine"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/connpool"
@@ -69,9 +70,10 @@ type QueryExecutor struct {
 }
 
 const (
-	streamRowsSize   = 256
-	resetLastIDQuery = "select last_insert_id(18446744073709547416)"
-	resetLastIDValue = 18446744073709547416
+	streamRowsSize    = 256
+	resetLastIDQuery  = "select last_insert_id(18446744073709547416)"
+	resetLastIDValue  = 18446744073709547416
+	userLabelDisabled = "UserLabelDisabled"
 )
 
 var (
@@ -154,6 +156,10 @@ func (qre *QueryExecutor) Execute() (reply *sqltypes.Result, err error) {
 
 	if err = qre.checkPermissions(); err != nil {
 		return nil, err
+	}
+
+	if reqThrottledErr := qre.tsv.queryThrottler.Throttle(qre.ctx, qre.targetTabletType, qre.plan.FullQuery, qre.connID, qre.options); reqThrottledErr != nil {
+		return nil, reqThrottledErr
 	}
 
 	if qre.plan.PlanID == p.PlanNextval {
@@ -244,7 +250,6 @@ func (qre *QueryExecutor) execAutocommit(f func(conn *StatefulConnection) (*sqlt
 	}
 
 	conn, _, _, err := qre.tsv.te.txPool.Begin(qre.ctx, qre.options, false, 0, qre.setting)
-
 	if err != nil {
 		return nil, err
 	}
@@ -303,6 +308,11 @@ func (qre *QueryExecutor) txConnExec(conn *StatefulConnection) (*sqltypes.Result
 		return qre.execRollbackToSavepoint(conn, qre.query, qre.plan.FullStmt)
 	case p.PlanRelease:
 		return qre.execTxQuery(conn, qre.query, false)
+	case p.PlanSelectNoLimit:
+		if qre.bindVars[sqltypes.BvReplaceSchemaName] != nil {
+			qre.bindVars[sqltypes.BvSchemaName] = sqltypes.StringBindVariable(qre.tsv.config.DB.DBName)
+		}
+		return qre.txFetch(conn, false)
 	case p.PlanSelect, p.PlanSelectImpossible, p.PlanShow, p.PlanSelectLockFunc:
 		maxrows := qre.getSelectLimit()
 		qre.bindVars["#maxLimit"] = sqltypes.Int64BindVariable(maxrows + 1)
@@ -341,6 +351,10 @@ func (qre *QueryExecutor) Stream(callback StreamCallback) error {
 
 	if err := qre.checkPermissions(); err != nil {
 		return err
+	}
+
+	if reqThrottledErr := qre.tsv.queryThrottler.Throttle(qre.ctx, qre.targetTabletType, qre.plan.FullQuery, qre.connID, qre.options); reqThrottledErr != nil {
+		return reqThrottledErr
 	}
 
 	switch qre.plan.PlanID {
@@ -525,10 +539,14 @@ func (qre *QueryExecutor) checkPermissions() error {
 }
 
 func (qre *QueryExecutor) checkAccess(authorized *tableacl.ACLResult, tableName string, callerID *querypb.VTGateCallerID) error {
-	statsKey := []string{tableName, authorized.GroupName, qre.plan.PlanID.String(), callerID.Username}
+	var aclState acl.ACLState
+	defer func() {
+		statsKey := qre.generateACLStatsKey(tableName, authorized, callerID)
+		qre.recordACLStats(statsKey, aclState)
+	}()
 	if !authorized.IsMember(callerID) {
 		if qre.tsv.qe.enableTableACLDryRun {
-			qre.tsv.Stats().TableaclPseudoDenied.Add(statsKey, 1)
+			aclState = acl.ACLPseudoDenied
 			return nil
 		}
 
@@ -542,15 +560,35 @@ func (qre *QueryExecutor) checkAccess(authorized *tableacl.ACLResult, tableName 
 			if len(callerID.Groups) > 0 {
 				groupStr = fmt.Sprintf(", in groups [%s],", strings.Join(callerID.Groups, ", "))
 			}
+			aclState = acl.ACLDenied
 			errStr := fmt.Sprintf("%s command denied to user '%s'%s for table '%s' (ACL check error)", qre.plan.PlanID.String(), callerID.Username, groupStr, tableName)
-			qre.tsv.Stats().TableaclDenied.Add(statsKey, 1)
 			qre.tsv.qe.accessCheckerLogger.Infof("%s", errStr)
 			return vterrors.Errorf(vtrpcpb.Code_PERMISSION_DENIED, "%s", errStr)
 		}
 		return nil
 	}
-	qre.tsv.Stats().TableaclAllowed.Add(statsKey, 1)
+	aclState = acl.ACLAllow
 	return nil
+}
+
+func (qre *QueryExecutor) generateACLStatsKey(tableName string, authorized *tableacl.ACLResult, callerID *querypb.VTGateCallerID) []string {
+	if qre.tsv.Config().SkipUserMetrics {
+		return []string{tableName, authorized.GroupName, qre.plan.PlanID.String(), userLabelDisabled}
+	}
+	return []string{tableName, authorized.GroupName, qre.plan.PlanID.String(), callerID.Username}
+}
+
+func (qre *QueryExecutor) recordACLStats(key []string, aclState acl.ACLState) {
+	switch aclState {
+	case acl.ACLAllow:
+		qre.tsv.Stats().TableaclAllowed.Add(key, 1)
+	case acl.ACLDenied:
+		qre.tsv.Stats().TableaclDenied.Add(key, 1)
+	case acl.ACLPseudoDenied:
+		qre.tsv.Stats().TableaclPseudoDenied.Add(key, 1)
+	case acl.ACLUnknown:
+		// nothing to record here.
+	}
 }
 
 func (qre *QueryExecutor) execDDL(conn *StatefulConnection) (result *sqltypes.Result, err error) {
@@ -596,7 +634,7 @@ func (qre *QueryExecutor) execDDL(conn *StatefulConnection) (result *sqltypes.Re
 			// after every DDL, let them be outdated until the periodic
 			// schema reload fixes it.
 			if err := qre.tsv.se.ReloadAtEx(qre.ctx, replication.Position{}, false); err != nil {
-				log.Errorf("failed to reload schema %v", err)
+				log.Error(fmt.Sprintf("failed to reload schema %v", err))
 			}
 		}()
 	}
@@ -656,7 +694,7 @@ func (qre *QueryExecutor) execNextval() (*sqltypes.Result, error) {
 			// Someone reset the id underneath us.
 			if t.SequenceInfo.LastVal != nextID {
 				if nextID < t.SequenceInfo.LastVal {
-					log.Warningf("Sequence next ID value %v is below the currently cached max %v, updating it to max", nextID, t.SequenceInfo.LastVal)
+					log.Warn(fmt.Sprintf("Sequence next ID value %v is below the currently cached max %v, updating it to max", nextID, t.SequenceInfo.LastVal))
 					nextID = t.SequenceInfo.LastVal
 				}
 				t.SequenceInfo.NextVal = nextID
@@ -705,6 +743,7 @@ func (qre *QueryExecutor) execSelect() (*sqltypes.Result, error) {
 	// Check tablet type.
 	if qre.shouldConsolidate() {
 		q, original := qre.tsv.qe.consolidator.Create(sqlWithoutComments)
+		waiterCapExceeded := false
 		if original {
 			defer q.Broadcast()
 			conn, err := qre.getConn()
@@ -724,13 +763,21 @@ func (qre *QueryExecutor) execSelect() (*sqltypes.Result, error) {
 				startTime := time.Now()
 				q.Wait()
 				qre.tsv.stats.WaitTimings.Record("Consolidations", startTime)
+			} else {
+				// Waiter cap exceeded, fall back to independent query execution
+				waiterCapExceeded = true
 			}
 			q.AddWaiterCounter(-1)
 		}
-		if q.Err() != nil {
-			return nil, q.Err()
+
+		// Return consolidation results unless waiter cap was exceeded
+		if !waiterCapExceeded {
+			if q.Err() != nil {
+				return nil, q.Err()
+			}
+			return q.Result(), nil
 		}
-		return q.Result(), nil
+		// If waiter cap exceeded, fall through to independent execution
 	}
 	conn, err := qre.getConn()
 	if err != nil {
@@ -768,7 +815,7 @@ func (qre *QueryExecutor) verifyRowCount(count, maxrows int64) error {
 	if warnThreshold > 0 && count > warnThreshold {
 		callerID := callerid.ImmediateCallerIDFromContext(qre.ctx)
 		qre.tsv.Stats().Warnings.Add("ResultsExceeded", 1)
-		log.Warningf("caller id: %s row count %v exceeds warning threshold %v: %q", callerID.Username, count, warnThreshold, queryAsString(qre.plan.FullQuery.Query, qre.bindVars, qre.tsv.Config().SanitizeLogMessages, true, qre.tsv.env.Parser()))
+		log.Warn(fmt.Sprintf("caller id: %s row count %v exceeds warning threshold %v: %q", callerID.Username, count, warnThreshold, queryAsString(qre.plan.FullQuery.Query, qre.bindVars, qre.tsv.Config().SanitizeLogMessages, true, qre.tsv.env.Parser())))
 	}
 	return nil
 }
@@ -978,9 +1025,13 @@ func (qre *QueryExecutor) execAlterMigration() (*sqltypes.Result, error) {
 	case sqlparser.LaunchAllMigrationType:
 		return qre.tsv.onlineDDLExecutor.LaunchMigrations(qre.ctx)
 	case sqlparser.CompleteMigrationType:
-		return qre.tsv.onlineDDLExecutor.CompleteMigration(qre.ctx, alterMigration.UUID)
+		return qre.tsv.onlineDDLExecutor.CompleteMigration(qre.ctx, alterMigration.UUID, alterMigration.Shards)
 	case sqlparser.CompleteAllMigrationType:
 		return qre.tsv.onlineDDLExecutor.CompletePendingMigrations(qre.ctx)
+	case sqlparser.PostponeCompleteMigrationType:
+		return qre.tsv.onlineDDLExecutor.PostponeCompleteMigration(qre.ctx, alterMigration.UUID)
+	case sqlparser.PostponeCompleteAllMigrationType:
+		return qre.tsv.onlineDDLExecutor.PostponeCompletePendingMigrations(qre.ctx)
 	case sqlparser.CancelMigrationType:
 		return qre.tsv.onlineDDLExecutor.CancelMigration(qre.ctx, alterMigration.UUID, "CANCEL issued by user", true)
 	case sqlparser.CancelAllMigrationType:
@@ -1158,7 +1209,7 @@ func (qre *QueryExecutor) execStatefulConn(conn *StatefulConnection, sql string,
 		return nil, err
 	}
 
-	exec, err := conn.Exec(ctx, sql, int(qre.tsv.qe.maxResultSize.Load()), wantfields)
+	exec, err := conn.Exec(ctx, sql, qre.getMaxResultSize(), wantfields)
 	if err != nil {
 		return nil, err
 	}
@@ -1168,6 +1219,13 @@ func (qre *QueryExecutor) execStatefulConn(conn *StatefulConnection, sql string,
 	}
 
 	return exec, nil
+}
+
+func (qre *QueryExecutor) getMaxResultSize() int {
+	if qre.plan.PlanID == p.PlanSelectNoLimit {
+		return mysql.FETCH_ALL_ROWS
+	}
+	return int(qre.tsv.qe.maxResultSize.Load())
 }
 
 func (qre *QueryExecutor) resetLastInsertIDIfNeeded(ctx context.Context, conn *connpool.Conn) error {
@@ -1262,9 +1320,14 @@ func (qre *QueryExecutor) execStreamSQL(conn *connpool.PooledConn, isTransaction
 }
 
 func (qre *QueryExecutor) recordUserQuery(queryType string, duration int64) {
-	username := callerid.GetPrincipal(callerid.EffectiveCallerIDFromContext(qre.ctx))
-	if username == "" {
-		username = callerid.GetUsername(callerid.ImmediateCallerIDFromContext(qre.ctx))
+	var username string
+	if qre.tsv.config.SkipUserMetrics {
+		username = userLabelDisabled
+	} else {
+		username = callerid.GetPrincipal(callerid.EffectiveCallerIDFromContext(qre.ctx))
+		if username == "" {
+			username = callerid.GetUsername(callerid.ImmediateCallerIDFromContext(qre.ctx))
+		}
 	}
 	tableName := qre.plan.TableName().String()
 	qre.tsv.Stats().UserTableQueryCount.Add([]string{tableName, username, queryType}, 1)
@@ -1274,11 +1337,21 @@ func (qre *QueryExecutor) recordUserQuery(queryType string, duration int64) {
 func (qre *QueryExecutor) GetSchemaDefinitions(tableType querypb.SchemaTableType, tableNames []string, callback func(schemaRes *querypb.GetSchemaResponse) error) error {
 	switch tableType {
 	case querypb.SchemaTableType_VIEWS:
-		return qre.getViewDefinitions(tableNames, callback)
+		// Only fetch view definitions if views are enabled in the configuration.
+		// When views are disabled, return nil (empty result).
+		if qre.tsv.config.EnableViews {
+			return qre.getViewDefinitions(tableNames, callback)
+		}
+		return nil
 	case querypb.SchemaTableType_TABLES:
 		return qre.getTableDefinitions(tableNames, callback)
 	case querypb.SchemaTableType_ALL:
-		return qre.getAllDefinitions(tableNames, callback)
+		// When requesting all schema definitions, only include views if they are enabled.
+		// If views are disabled, fall back to returning only table definitions.
+		if qre.tsv.config.EnableViews {
+			return qre.getAllDefinitions(tableNames, callback)
+		}
+		return qre.getTableDefinitions(tableNames, callback)
 	case querypb.SchemaTableType_UDFS:
 		return qre.getUDFs(callback)
 	}

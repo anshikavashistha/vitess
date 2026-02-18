@@ -44,8 +44,10 @@ type (
 	}
 )
 
-var _ IR = (*Column)(nil)
-var _ Expr = (*Column)(nil)
+var (
+	_ IR   = (*Column)(nil)
+	_ Expr = (*Column)(nil)
+)
 
 func (c *Column) IR() IR {
 	return c
@@ -128,13 +130,14 @@ func (column *Column) compile(c *compiler) (ctype, error) {
 	case tt == sqltypes.Set:
 		c.asm.PushColumn_set(column.Offset, column.Values)
 	case sqltypes.IsText(tt):
-		if tt == sqltypes.HexNum {
+		switch tt {
+		case sqltypes.HexNum:
 			c.asm.PushColumn_hexnum(column.Offset)
 			typ.Type = sqltypes.VarBinary
-		} else if tt == sqltypes.HexVal {
+		case sqltypes.HexVal:
 			c.asm.PushColumn_hexval(column.Offset)
 			typ.Type = sqltypes.VarBinary
-		} else {
+		default:
 			c.asm.PushColumn_text(column.Offset, typ.Col)
 			typ.Type = sqltypes.VarChar
 		}

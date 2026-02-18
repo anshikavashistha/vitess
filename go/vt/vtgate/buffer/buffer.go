@@ -28,6 +28,7 @@ package buffer
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -86,10 +87,10 @@ func init() {
 // To simplify things, we've merged the detection for different MySQL flavors
 // in one function. Supported flavors: MariaDB, MySQL
 func CausedByFailover(err error) bool {
-	log.V(2).Infof("Checking error (type: %T) if it is caused by a failover. err: %v", err, err)
+	log.V(2).Info(fmt.Sprintf("Checking error (type: %T) if it is caused by a failover. err: %v", err, err))
 	reason, isFailover := isFailoverError(err)
 	if isFailover {
-		log.Infof("CausedByFailover signalling failover for reason: %s", reason)
+		log.Info("CausedByFailover signalling failover for reason: " + reason)
 	}
 	return isFailover
 }
@@ -147,7 +148,7 @@ type Buffer struct {
 	config *Config
 
 	// bufferSizeSema limits how many requests can be buffered
-	// ("-buffer_size") and is shared by all shardBuffer instances.
+	// ("-buffer-size") and is shared by all shardBuffer instances.
 	bufferSizeSema *semaphore.Weighted
 	bufferSize     int
 
@@ -156,7 +157,7 @@ type Buffer struct {
 	// - 1. Requests which may buffer (RLock, can be run in parallel)
 	// - 2. Request which starts buffering (based on the seen error)
 	// - 3. HealthCheck subscriber ("StatsUpdate") which stops buffering
-	// - 4. Timer which may stop buffering after -buffer_max_failover_duration
+	// - 4. Timer which may stop buffering after -buffer-max-failover-duration
 	mu sync.RWMutex
 	// buffers holds a shardBuffer object per shard, even if no failover is in
 	// progress.
@@ -208,7 +209,7 @@ func (b *Buffer) WaitForFailoverEnd(ctx context.Context, keyspace, shard string,
 }
 
 func (b *Buffer) HandleKeyspaceEvent(ksevent *discovery.KeyspaceEvent) {
-	log.Infof("Keyspace Event received for keyspace %v", ksevent.Keyspace)
+	log.Info(fmt.Sprintf("Keyspace Event received for keyspace %v", ksevent.Keyspace))
 	for _, shard := range ksevent.Shards {
 		sb := b.getOrCreateBuffer(shard.Target.Keyspace, shard.Target.Shard)
 		if sb != nil {

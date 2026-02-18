@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -337,15 +338,15 @@ func (node *ParsedComments) AddQueryHint(queryHint string) (Comments, error) {
 					return nil, vterrors.New(vtrpcpb.Code_INTERNAL, "Must have only one query hint")
 				}
 				hasQueryHint = true
-				idx := strings.Index(comment, "*/")
-				if idx == -1 {
+				before, _, ok := strings.Cut(comment, "*/")
+				if !ok {
 					return nil, vterrors.New(vtrpcpb.Code_INTERNAL, "Query hint comment is malformed")
 				}
 				if strings.Contains(comment, queryHint) {
 					newComments = append(Comments{comment}, newComments...)
 					continue
 				}
-				newComment := fmt.Sprintf("%s %s */", strings.TrimSpace(comment[:idx]), queryHint)
+				newComment := fmt.Sprintf("%s %s */", strings.TrimSpace(before), queryHint)
 				newComments = append(Comments{newComment}, newComments...)
 				continue
 			}
@@ -466,7 +467,7 @@ func ReplaceExpr(root, from, to Expr) Expr {
 
 	expr, success := tmp.(Expr)
 	if !success {
-		log.Errorf("Failed to rewrite expression. Rewriter returned a non-expression:  %s", String(tmp))
+		log.Error("Failed to rewrite expression. Rewriter returned a non-expression:  " + String(tmp))
 		return from
 	}
 
@@ -867,11 +868,11 @@ func NewLimit(offset, rowCount int) *Limit {
 	return &Limit{
 		Offset: &Literal{
 			Type: IntVal,
-			Val:  fmt.Sprint(offset),
+			Val:  strconv.Itoa(offset),
 		},
 		Rowcount: &Literal{
 			Type: IntVal,
-			Val:  fmt.Sprint(rowCount),
+			Val:  strconv.Itoa(rowCount),
 		},
 	}
 }
@@ -882,7 +883,7 @@ func NewLimitWithoutOffset(rowCount int) *Limit {
 		Offset: nil,
 		Rowcount: &Literal{
 			Type: IntVal,
-			Val:  fmt.Sprint(rowCount),
+			Val:  strconv.Itoa(rowCount),
 		},
 	}
 }
@@ -1062,12 +1063,7 @@ func (node IdentifierCI) EqualString(str string) bool {
 
 // EqualsAnyString returns true if any of these strings match
 func (node IdentifierCI) EqualsAnyString(str []string) bool {
-	for _, s := range str {
-		if node.EqualString(s) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(str, node.EqualString)
 }
 
 // MarshalJSON marshals into JSON.
@@ -1142,7 +1138,7 @@ func containEscapableChars(s string, at AtCount) bool {
 		c := uint16(s[i])
 		letter := isLetter(c)
 		systemVarChar := isDbSystemVariable && isCarat(c)
-		if !(letter || systemVarChar) {
+		if !letter && !systemVarChar {
 			if i == 0 || !isDigit(c) {
 				return true
 			}
@@ -1458,6 +1454,8 @@ func (action DDLAction) ToString() string {
 		return RenameStr
 	case TruncateDDLAction:
 		return TruncateStr
+	case CreateProcedureAction:
+		return CreateProcStr
 	case CreateVindexDDLAction:
 		return CreateVindexStr
 	case DropVindexDDLAction:
@@ -1480,6 +1478,66 @@ func (action DDLAction) ToString() string {
 		return DropAutoIncStr
 	default:
 		return "Unknown DDL Action"
+	}
+}
+
+// ToString returns the string associated with the ProcParameterMode Enum
+func (action ProcParameterMode) ToString() string {
+	switch action {
+	case InMode:
+		return InStr
+	case OutMode:
+		return OutStr
+	case InoutMode:
+		return InoutStr
+	default:
+		return "Unknown Proc Parameter Mode"
+	}
+}
+
+// ToString returns the type as a string
+func (scn SignalConditionName) ToString() string {
+	switch scn {
+	case ClassOriginType:
+		return ClassOriginTypeStr
+	case SubclassOriginType:
+		return SubclassOriginTypeStr
+	case MessageTextType:
+		return MessageTextTypeStr
+	case MySQLErrNoType:
+		return MySQLErrNoTypeStr
+	case ConstraintCatalogType:
+		return ConstraintCatalogTypeStr
+	case ConstraintSchemaType:
+		return ConstraintSchemaTypeStr
+	case ConstraintNameType:
+		return ConstraintNameTypeStr
+	case CatalogNameType:
+		return CatalogNameTypeStr
+	case SchemaNameType:
+		return SchemaNameTypeStr
+	case TableNameType:
+		return TableNameTypeStr
+	case ColumnNameType:
+		return ColumnNameTypeStr
+	case CursorNameType:
+		return CursorNameTypeStr
+	default:
+		return "Unknown SignalConditionName"
+	}
+}
+
+// ToString returns the string associated with the HandlerAction Enum
+func (ha HandlerAction) ToString() string {
+	switch ha {
+	case ContinueAction:
+		return ContinueStr
+	case ExitAction:
+		return ExitStr
+	case UndoAction:
+		return UndoStr
+	default:
+		return "Unknown Handler Action"
 	}
 }
 
@@ -2254,6 +2312,8 @@ func (key DropKeyType) ToString() string {
 		return NormalKeyTypeStr
 	case CheckKeyType:
 		return CheckKeyTypeStr
+	case ConstraintType:
+		return ConstraintTypeStr
 	default:
 		return "Unknown DropKeyType"
 	}
@@ -2556,7 +2616,7 @@ func AndExpressions(exprs ...Expr) Expr {
 				continue outer
 			}
 
-			for j := 0; j < i; j++ {
+			for j := range i {
 				if Equals.Expr(expr, exprs[j]) {
 					continue outer
 				}
@@ -2980,6 +3040,7 @@ func (node *Select) SetWherePredicate(expr Expr) {
 		Expr: expr,
 	}
 }
+
 func (node *Delete) GetFrom() []TableExpr {
 	return node.TableExprs
 }

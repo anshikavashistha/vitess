@@ -46,21 +46,26 @@ func VisitAST(in AST, f Visit) error {
 		return VisitValueContainer(in, f)
 	case ValueSliceContainer:
 		return VisitValueSliceContainer(in, f)
+	case Visitable:
+		return VisitVisitable(in, f)
 	default:
 		// this should never happen
 		return nil
 	}
 }
+
 func VisitBytes(in Bytes, f Visit) error {
 	_, err := f(in)
 	return err
 }
+
 func VisitInterfaceContainer(in InterfaceContainer, f Visit) error {
 	if cont, err := f(in); err != nil || !cont {
 		return err
 	}
 	return nil
 }
+
 func VisitInterfaceSlice(in InterfaceSlice, f Visit) error {
 	if in == nil {
 		return nil
@@ -75,6 +80,7 @@ func VisitInterfaceSlice(in InterfaceSlice, f Visit) error {
 	}
 	return nil
 }
+
 func VisitRefOfLeaf(in *Leaf, f Visit) error {
 	if in == nil {
 		return nil
@@ -84,6 +90,7 @@ func VisitRefOfLeaf(in *Leaf, f Visit) error {
 	}
 	return nil
 }
+
 func VisitLeafSlice(in LeafSlice, f Visit) error {
 	if in == nil {
 		return nil
@@ -98,6 +105,7 @@ func VisitLeafSlice(in LeafSlice, f Visit) error {
 	}
 	return nil
 }
+
 func VisitRefOfNoCloneType(in *NoCloneType, f Visit) error {
 	if in == nil {
 		return nil
@@ -107,6 +115,7 @@ func VisitRefOfNoCloneType(in *NoCloneType, f Visit) error {
 	}
 	return nil
 }
+
 func VisitRefOfRefContainer(in *RefContainer, f Visit) error {
 	if in == nil {
 		return nil
@@ -122,6 +131,7 @@ func VisitRefOfRefContainer(in *RefContainer, f Visit) error {
 	}
 	return nil
 }
+
 func VisitRefOfRefSliceContainer(in *RefSliceContainer, f Visit) error {
 	if in == nil {
 		return nil
@@ -141,6 +151,7 @@ func VisitRefOfRefSliceContainer(in *RefSliceContainer, f Visit) error {
 	}
 	return nil
 }
+
 func VisitRefOfSubImpl(in *SubImpl, f Visit) error {
 	if in == nil {
 		return nil
@@ -153,6 +164,7 @@ func VisitRefOfSubImpl(in *SubImpl, f Visit) error {
 	}
 	return nil
 }
+
 func VisitValueContainer(in ValueContainer, f Visit) error {
 	if cont, err := f(in); err != nil || !cont {
 		return err
@@ -165,6 +177,7 @@ func VisitValueContainer(in ValueContainer, f Visit) error {
 	}
 	return nil
 }
+
 func VisitValueSliceContainer(in ValueSliceContainer, f Visit) error {
 	if cont, err := f(in); err != nil || !cont {
 		return err
@@ -179,6 +192,7 @@ func VisitValueSliceContainer(in ValueSliceContainer, f Visit) error {
 	}
 	return nil
 }
+
 func VisitSubIface(in SubIface, f Visit) error {
 	if in == nil {
 		return nil
@@ -186,15 +200,19 @@ func VisitSubIface(in SubIface, f Visit) error {
 	switch in := in.(type) {
 	case *SubImpl:
 		return VisitRefOfSubImpl(in, f)
+	case Visitable:
+		return VisitVisitable(in, f)
 	default:
 		// this should never happen
 		return nil
 	}
 }
+
 func VisitBasicType(in BasicType, f Visit) error {
 	_, err := f(in)
 	return err
 }
+
 func VisitRefOfInterfaceContainer(in *InterfaceContainer, f Visit) error {
 	if in == nil {
 		return nil
@@ -204,6 +222,7 @@ func VisitRefOfInterfaceContainer(in *InterfaceContainer, f Visit) error {
 	}
 	return nil
 }
+
 func VisitRefOfValueContainer(in *ValueContainer, f Visit) error {
 	if in == nil {
 		return nil
@@ -219,6 +238,7 @@ func VisitRefOfValueContainer(in *ValueContainer, f Visit) error {
 	}
 	return nil
 }
+
 func VisitRefOfValueSliceContainer(in *ValueSliceContainer, f Visit) error {
 	if in == nil {
 		return nil
@@ -232,6 +252,16 @@ func VisitRefOfValueSliceContainer(in *ValueSliceContainer, f Visit) error {
 		}
 	}
 	if err := VisitLeafSlice(in.ASTImplementationElements, f); err != nil {
+		return err
+	}
+	return nil
+}
+
+func VisitVisitable(in Visitable, f Visit) error {
+	if cont, err := f(in); err != nil || !cont {
+		return err
+	}
+	if err := VisitAST(in.VisitThis(), f); err != nil {
 		return err
 	}
 	return nil

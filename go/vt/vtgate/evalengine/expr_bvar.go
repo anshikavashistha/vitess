@@ -38,8 +38,10 @@ type (
 	}
 )
 
-var _ IR = (*BindVariable)(nil)
-var _ Expr = (*BindVariable)(nil)
+var (
+	_ IR   = (*BindVariable)(nil)
+	_ Expr = (*BindVariable)(nil)
+)
 
 func (env *ExpressionEnv) lookupBindVar(key string) (*querypb.BindVariable, error) {
 	val, ok := env.BindVars[key]
@@ -125,30 +127,36 @@ func (bvar *BindVariable) compile(c *compiler) (ctype, error) {
 
 	switch tt := typ.Type; {
 	case sqltypes.IsSigned(tt):
+		typ.Type = sqltypes.Int64
 		c.asm.PushBVar_i(bvar.Key)
 	case sqltypes.IsUnsigned(tt):
+		typ.Type = sqltypes.Uint64
 		c.asm.PushBVar_u(bvar.Key)
 	case sqltypes.IsFloat(tt):
+		typ.Type = sqltypes.Float64
 		c.asm.PushBVar_f(bvar.Key)
 	case sqltypes.IsDecimal(tt):
 		c.asm.PushBVar_d(bvar.Key)
 	case sqltypes.IsText(tt):
-		if tt == sqltypes.HexNum {
+		switch tt {
+		case sqltypes.HexNum:
 			c.asm.PushBVar_hexnum(bvar.Key)
 			typ.Type = sqltypes.VarBinary
 			typ.Flag |= flagHex
-		} else if tt == sqltypes.HexVal {
+		case sqltypes.HexVal:
 			c.asm.PushBVar_hexval(bvar.Key)
 			typ.Type = sqltypes.VarBinary
 			typ.Flag |= flagHex
-		} else if tt == sqltypes.BitNum {
+		case sqltypes.BitNum:
 			c.asm.PushBVar_bitnum(bvar.Key)
 			typ.Type = sqltypes.VarBinary
 			typ.Flag |= flagBit
-		} else {
+		default:
+			typ.Type = sqltypes.VarChar
 			c.asm.PushBVar_text(bvar.Key, typ.Col)
 		}
 	case sqltypes.IsBinary(tt):
+		typ.Type = sqltypes.VarBinary
 		c.asm.PushBVar_bin(bvar.Key)
 	case sqltypes.IsNull(tt):
 		c.asm.PushNull()
@@ -164,6 +172,8 @@ func (bvar *BindVariable) compile(c *compiler) (ctype, error) {
 		c.asm.PushBVar_time(bvar.Key)
 	case tt == sqltypes.Vector:
 		c.asm.PushBVar_vector(bvar.Key)
+	case tt == sqltypes.Tuple:
+		c.asm.PushBVar_tuple(bvar.Key)
 	default:
 		return ctype{}, vterrors.Errorf(vtrpcpb.Code_UNIMPLEMENTED, "Type is not supported: %s", tt)
 	}

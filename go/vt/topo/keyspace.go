@@ -18,6 +18,7 @@ package topo
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"sort"
 	"sync"
@@ -168,7 +169,7 @@ func (ts *Server) UpdateKeyspace(ctx context.Context, ki *KeyspaceInfo) error {
 		return err
 	}
 
-	data, err := ki.Keyspace.MarshalVT()
+	data, err := ki.MarshalVT()
 	if err != nil {
 		return err
 	}
@@ -301,13 +302,11 @@ func (ts *Server) FindAllShardsInKeyspace(ctx context.Context, keyspace string, 
 	eg.SetLimit(int(opt.Concurrency))
 
 	for _, shard := range shards {
-		shard := shard
-
 		eg.Go(func() error {
 			si, err := ts.GetShard(ctx, keyspace, shard)
 			switch {
 			case IsErrType(err, NoNode):
-				log.Warningf("GetShard(%s, %s) returned ErrNoNode, consider checking the topology.", keyspace, shard)
+				log.Warn(fmt.Sprintf("GetShard(%s, %s) returned ErrNoNode, consider checking the topology.", keyspace, shard))
 				return nil
 			case err == nil:
 				mu.Lock()
@@ -390,6 +389,41 @@ func (ts *Server) DeleteKeyspace(ctx context.Context, keyspace string) error {
 		Keyspace:     nil,
 		Status:       "deleted",
 	})
+	return nil
+}
+
+// DeleteOrphanedKeyspaceFiles clears the residual files for a given keyspace in a cell.
+func (ts *Server) DeleteOrphanedKeyspaceFiles(ctx context.Context, cell string, keyspace string) error {
+	conn, err := ts.ConnForCell(ctx, cell)
+	if err != nil {
+		return err
+	}
+
+	dirsToClear := []string{path.Join(KeyspacesPath, keyspace)}
+	for len(dirsToClear) > 0 {
+		dir := dirsToClear[len(dirsToClear)-1]
+		dirsToClear = dirsToClear[0 : len(dirsToClear)-1]
+
+		children, err := conn.ListDir(ctx, dir, true)
+		if err != nil {
+			if IsErrType(err, NoNode) {
+				continue
+			}
+			return err
+		}
+
+		for _, child := range children {
+			childPath := path.Join(dir, child.Name)
+			if child.Type == TypeDirectory {
+				dirsToClear = append(dirsToClear, childPath)
+				continue
+			}
+			err = conn.Delete(ctx, childPath, nil)
+			if err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

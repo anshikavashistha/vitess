@@ -24,17 +24,15 @@ import (
 	"vitess.io/vitess/go/vt/topo/topoproto"
 )
 
-var (
-	// base is a parent command for Workflow commands.
-	base = &cobra.Command{
-		Use:                   "Workflow --keyspace <keyspace> [command] [command-flags]",
-		Short:                 "Administer VReplication workflows (Reshard, MoveTables, etc) in the given keyspace.",
-		DisableFlagsInUseLine: true,
-		Aliases:               []string{"workflow"},
-		Args:                  cobra.ExactArgs(1),
-		RunE:                  commandGetWorkflows,
-	}
-)
+// base is a parent command for Workflow commands.
+var base = &cobra.Command{
+	Use:                   "Workflow --keyspace <keyspace> [command] [command-flags]",
+	Short:                 "Administer VReplication workflows (Reshard, MoveTables, etc) in the given keyspace.",
+	DisableFlagsInUseLine: true,
+	Aliases:               []string{"workflow"},
+	Args:                  cobra.ExactArgs(1),
+	RunE:                  commandGetWorkflows,
+}
 
 var (
 	baseOptions = struct {
@@ -62,6 +60,7 @@ func registerCommands(root *cobra.Command) {
 	delete.Flags().BoolVar(&deleteOptions.KeepData, "keep-data", false, "Keep the partially copied table data from the workflow in the target keyspace.")
 	delete.Flags().BoolVar(&deleteOptions.KeepRoutingRules, "keep-routing-rules", false, "Keep the routing rules created for the workflow.")
 	delete.Flags().Int64Var(&deleteOptions.DeleteBatchSize, "delete-batch-size", movetables.DefaultDeleteBatchSize, "When cleaning up the migrated data in tables moved as part of a multi-tenant MoveTables workflow, delete the records in batches of this size.")
+	delete.Flags().BoolVar(&deleteOptions.IgnoreSourceKeyspace, "ignore-source-keyspace", false, "WARNING: This option should only be used when absolutely necessary. Ignore the source keyspace as the workflow is deleted and cleaned up. This allows the workflow to be deleted if the source keyspace has been deleted or is not currently available. NOTE: this is only used with MoveTables.")
 	common.AddShardSubsetFlag(delete, &baseOptions.Shards)
 	base.AddCommand(delete)
 

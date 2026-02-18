@@ -17,6 +17,7 @@ limitations under the License.
 package tmclienttest
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/spf13/pflag"
@@ -26,9 +27,9 @@ import (
 	"vitess.io/vitess/go/vt/vttablet/tmclient"
 )
 
-const tmclientProtocolFlagName = "tablet_manager_protocol"
+const tmclientProtocolFlagName = "tablet-manager-protocol"
 
-// SetProtocol is a helper function to set the tmclient --tablet_manager_protocol
+// SetProtocol is a helper function to set the tmclient --tablet-manager-protocol
 // flag value for tests. If successful, it returns a function that, when called,
 // returns the flag to its previous value.
 //
@@ -53,13 +54,13 @@ func SetProtocol(name string, protocol string) (reset func()) {
 	case nil:
 		reset = func() { SetProtocol(name, oldVal) }
 	default:
-		log.Errorf("failed to get string value for flag %q: %v", tmclientProtocolFlagName, err)
+		log.Error(fmt.Sprintf("failed to get string value for flag %q: %v", tmclientProtocolFlagName, err))
 		reset = func() {}
 	}
 
 	if err := pflag.Set(tmclientProtocolFlagName, protocol); err != nil {
 		msg := "failed to set flag %q to %q: %v"
-		log.Errorf(msg, tmclientProtocolFlagName, protocol, err)
+		log.Error(fmt.Sprintf(msg, tmclientProtocolFlagName, protocol, err))
 		reset = func() {}
 	}
 

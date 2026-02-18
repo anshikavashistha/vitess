@@ -64,11 +64,6 @@ func registerCommands(root *cobra.Command) {
 	create.Flags().StringVar(&createOptions.ShardedAutoIncrementHandlingStr, "sharded-auto-increment-handling", vtctldatapb.ShardedAutoIncrementHandling_REMOVE.String(),
 		fmt.Sprintf("If moving the table(s) to a sharded keyspace, remove any MySQL auto_increment clauses when copying the schema to the target as sharded keyspaces should rely on either user/application generated values or Vitess sequences to ensure uniqueness. If REPLACE is specified then they are automatically replaced by Vitess sequence definitions. (options are: %s)",
 			shardedAutoIncHandlingStrOptions))
-	// This flag was deprecated in v21 so can be removed in v22+.
-	create.Flags().StringVar(&createOptions.ShardedAutoIncrementHandlingStr, "remove-sharded-auto-increment", vtctldatapb.ShardedAutoIncrementHandling_REMOVE.String(),
-		fmt.Sprintf("If moving the table(s) to a sharded keyspace, remove any MySQL auto_increment clauses when copying the schema to the target as sharded keyspaces should rely on either user/application generated values or Vitess sequences to ensure uniqueness. If REPLACE is specified then they are automatically replaced by Vitess sequence definitions. (options are: %s)",
-			shardedAutoIncHandlingStrOptions))
-	create.Flags().MarkDeprecated("remove-sharded-auto-increment", "please use --sharded-auto-increment-handling instead.")
 	base.AddCommand(create)
 
 	opts := &common.SubCommandsOpts{
@@ -83,8 +78,13 @@ func registerCommands(root *cobra.Command) {
 	common.AddShardSubsetFlag(statusCommand, &common.StatusOptions.Shards)
 	base.AddCommand(statusCommand)
 
-	base.AddCommand(common.GetStartCommand(opts))
-	base.AddCommand(common.GetStopCommand(opts))
+	startCommand := common.GetStartCommand(opts)
+	common.AddShardSubsetFlag(startCommand, &common.StartStopOptions.Shards)
+	base.AddCommand(startCommand)
+
+	stopCommand := common.GetStopCommand(opts)
+	common.AddShardSubsetFlag(stopCommand, &common.StartStopOptions.Shards)
+	base.AddCommand(stopCommand)
 
 	mirrorTrafficCommand := common.GetMirrorTrafficCommand(opts)
 	mirrorTrafficCommand.Flags().Var((*topoproto.TabletTypeListFlag)(&common.MirrorTrafficOptions.TabletTypes), "tablet-types", "Tablet types to mirror traffic for.")
@@ -106,6 +106,7 @@ func registerCommands(root *cobra.Command) {
 	complete.Flags().BoolVar(&common.CompleteOptions.KeepRoutingRules, "keep-routing-rules", false, "Keep the routing rules in place that direct table traffic from the source keyspace to the target keyspace of the MoveTables workflow.")
 	complete.Flags().BoolVar(&common.CompleteOptions.RenameTables, "rename-tables", false, "Keep the original source table data that was copied by the MoveTables workflow, but rename each table to '_<tablename>_old'.")
 	complete.Flags().BoolVar(&common.CompleteOptions.DryRun, "dry-run", false, "Print the actions that would be taken and report any known errors that would have occurred.")
+	complete.Flags().BoolVar(&common.CompleteOptions.IgnoreSourceKeyspace, "ignore-source-keyspace", false, "WARNING: This option should only be used when absolutely necessary. Ignore the source keyspace as the workflow is completed and cleaned up. This allows the workflow to be completed if the source keyspace has been deleted or is not currently available.")
 	common.AddShardSubsetFlag(complete, &common.CompleteOptions.Shards)
 	base.AddCommand(complete)
 
@@ -113,6 +114,7 @@ func registerCommands(root *cobra.Command) {
 	cancel.Flags().BoolVar(&common.CancelOptions.KeepData, "keep-data", false, "Keep the partially copied table data from the MoveTables workflow in the target keyspace.")
 	cancel.Flags().BoolVar(&common.CancelOptions.KeepRoutingRules, "keep-routing-rules", false, "Keep the routing rules created for the MoveTables workflow.")
 	cancel.Flags().Int64Var(&common.CancelOptions.DeleteBatchSize, "delete-batch-size", DefaultDeleteBatchSize, "When cleaning up the migrated data in tables moved as part of a multi-tenant workflow, delete the records in batches of this size.")
+	cancel.Flags().BoolVar(&common.CancelOptions.IgnoreSourceKeyspace, "ignore-source-keyspace", false, "WARNING: This option should only be used when absolutely necessary. Ignore the source keyspace as the workflow is canceled and cleaned up. This allows the workflow to be canceled if the source keyspace has been deleted or is not currently available.")
 	common.AddShardSubsetFlag(cancel, &common.CancelOptions.Shards)
 	base.AddCommand(cancel)
 }

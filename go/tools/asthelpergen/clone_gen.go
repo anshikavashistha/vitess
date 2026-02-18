@@ -17,7 +17,6 @@ limitations under the License.
 package asthelpergen
 
 import (
-	"fmt"
 	"go/types"
 	"log"
 	"slices"
@@ -26,7 +25,11 @@ import (
 	"github.com/dave/jennifer/jen"
 )
 
+// CloneOptions configures the clone generator behavior.
 type CloneOptions struct {
+	// Exclude specifies type patterns that should not be deep cloned.
+	// Types matching these patterns will be returned as-is instead of being cloned.
+	// Patterns use glob-style matching (e.g., "*NoCloneType").
 	Exclude []string
 }
 
@@ -52,7 +55,7 @@ func newCloneGen(pkgname string, options *CloneOptions) *cloneGen {
 }
 
 func (c *cloneGen) addFunc(name string, code *jen.Statement) {
-	c.file.Add(jen.Comment(fmt.Sprintf("%s creates a deep clone of the input.", name)))
+	c.file.Add(jen.Comment(name + " creates a deep clone of the input."))
 	c.file.Add(code)
 }
 
@@ -68,7 +71,7 @@ func (c *cloneGen) readValueOfType(t types.Type, expr jen.Code, spi generatorSPI
 	case *types.Basic:
 		return expr
 	case *types.Interface:
-		if types.TypeString(t, noQualifier) == "any" {
+		if types.TypeString(t, noQualifier) == anyTypeName {
 			// these fields have to be taken care of manually
 			return expr
 		}
@@ -127,7 +130,6 @@ func (c *cloneGen) copySliceElement(t types.Type, elType types.Type, spi generat
 }
 
 func (c *cloneGen) interfaceMethod(t types.Type, iface *types.Interface, spi generatorSPI) error {
-
 	// func CloneAST(in AST) AST {
 	//	if in == nil {
 	//	return nil
@@ -235,8 +237,7 @@ func (c *cloneGen) ptrToStructMethod(t types.Type, strct *types.Struct, spi gene
 	}
 
 	var fields []jen.Code
-	for i := 0; i < strct.NumFields(); i++ {
-		field := strct.Field(i)
+	for field := range strct.Fields() {
 		if isBasic(field.Type()) || strings.HasPrefix(field.Name(), "_") {
 			continue
 		}

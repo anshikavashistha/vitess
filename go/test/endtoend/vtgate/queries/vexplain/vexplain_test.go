@@ -17,20 +17,18 @@ limitations under the License.
 package vexplain
 
 import (
-	"context"
 	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"vitess.io/vitess/go/sqltypes"
-
 	"vitess.io/vitess/go/mysql"
+	"vitess.io/vitess/go/sqltypes"
 	"vitess.io/vitess/go/test/endtoend/utils"
 )
 
 func start(t *testing.T) (*mysql.Conn, func()) {
-	ctx := context.Background()
+	ctx := t.Context()
 	vtConn, err := mysql.Connect(ctx, &vtParams)
 	require.NoError(t, err)
 
@@ -75,7 +73,7 @@ func TestVtGateVExplain(t *testing.T) {
 		"vexplain queries/all will actually run queries")
 
 	binaryPrefix := ""
-	if utils.BinaryIsAtLeastAtVersion(22, "vtgate") {
+	if utils.BinaryIsAtLeastAtVersion(23, "vtgate") {
 		binaryPrefix = "_binary"
 	}
 

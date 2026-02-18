@@ -32,6 +32,7 @@ import (
 	"vitess.io/vitess/go/mysql"
 	"vitess.io/vitess/go/test/endtoend/cluster"
 	"vitess.io/vitess/go/test/endtoend/utils"
+	vtutils "vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vtgate/planbuilder"
 )
 
@@ -70,16 +71,16 @@ func TestMain(m *testing.M) {
 		var maxGrpcSize int64 = 256 * 1024 * 1024
 		clusterInstance.VtTabletExtraArgs = append(clusterInstance.VtTabletExtraArgs,
 			"--queryserver-config-max-result-size", "10000000",
-			"--grpc_max_message_size", strconv.FormatInt(maxGrpcSize, 10))
-		if err := clusterInstance.StartKeyspace(*keyspace, []string{"-80", "80-"}, 0, false); err != nil {
+			vtutils.GetFlagVariantForTests("--grpc-max-message-size"), strconv.FormatInt(maxGrpcSize, 10))
+		if err := clusterInstance.StartKeyspace(*keyspace, []string{"-80", "80-"}, 0, false, clusterInstance.Cell); err != nil {
 			return 1
 		}
 
 		// Start vtgate
 		clusterInstance.VtGatePlannerVersion = planbuilder.Gen4
 		clusterInstance.VtGateExtraArgs = append(clusterInstance.VtGateExtraArgs,
-			"--grpc_max_message_size", strconv.FormatInt(maxGrpcSize, 10),
-			"--max_memory_rows", "999999",
+			vtutils.GetFlagVariantForTests("--grpc-max-message-size"), strconv.FormatInt(maxGrpcSize, 10),
+			vtutils.GetFlagVariantForTests("--max-memory-rows"), "999999",
 			"--allow-kill-statement")
 		if err := clusterInstance.StartVtgate(); err != nil {
 			return 1
@@ -140,7 +141,7 @@ func dropData(t *testing.T) {
 func getRandomString(size int) string {
 	var str strings.Builder
 
-	for i := 0; i < size; i++ {
+	for range size {
 		str.WriteByte(byte((rand.Int() % 26) + 97))
 	}
 

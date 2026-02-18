@@ -29,7 +29,7 @@ import (
 )
 
 // InsertRecoveryDetection inserts the recovery analysis that has been detected.
-func InsertRecoveryDetection(analysisEntry *inst.ReplicationAnalysis) error {
+func InsertRecoveryDetection(analysisEntry *inst.DetectionAnalysis) error {
 	sqlResult, err := db.ExecVTOrc(`INSERT OR IGNORE
 		INTO recovery_detection (
 			alias,
@@ -46,16 +46,16 @@ func InsertRecoveryDetection(analysisEntry *inst.ReplicationAnalysis) error {
 		)`,
 		analysisEntry.AnalyzedInstanceAlias,
 		string(analysisEntry.Analysis),
-		analysisEntry.ClusterDetails.Keyspace,
-		analysisEntry.ClusterDetails.Shard,
+		analysisEntry.AnalyzedKeyspace,
+		analysisEntry.AnalyzedShard,
 	)
 	if err != nil {
-		log.Error(err)
+		log.Error(err.Error())
 		return err
 	}
 	id, err := sqlResult.LastInsertId()
 	if err != nil {
-		log.Error(err)
+		log.Error(err.Error())
 		return err
 	}
 	analysisEntry.RecoveryId = id
@@ -85,8 +85,8 @@ func writeTopologyRecovery(topologyRecovery *TopologyRecovery) (*TopologyRecover
 		sqlutils.NilIfZero(topologyRecovery.ID),
 		analysisEntry.AnalyzedInstanceAlias,
 		string(analysisEntry.Analysis),
-		analysisEntry.ClusterDetails.Keyspace,
-		analysisEntry.ClusterDetails.Shard,
+		analysisEntry.AnalyzedKeyspace,
+		analysisEntry.AnalyzedShard,
 		analysisEntry.AnalyzedInstanceAlias,
 		analysisEntry.RecoveryId,
 	)
@@ -109,16 +109,16 @@ func writeTopologyRecovery(topologyRecovery *TopologyRecovery) (*TopologyRecover
 }
 
 // AttemptRecoveryRegistration tries to add a recovery entry; if this fails that means recovery is already in place.
-func AttemptRecoveryRegistration(analysisEntry *inst.ReplicationAnalysis) (*TopologyRecovery, error) {
+func AttemptRecoveryRegistration(analysisEntry *inst.DetectionAnalysis) (*TopologyRecovery, error) {
 	// Check if there is an active recovery in progress for the cluster of the given instance.
-	recoveries, err := ReadActiveClusterRecoveries(analysisEntry.ClusterDetails.Keyspace, analysisEntry.ClusterDetails.Shard)
+	recoveries, err := ReadActiveClusterRecoveries(analysisEntry.AnalyzedKeyspace, analysisEntry.AnalyzedShard)
 	if err != nil {
-		log.Error(err)
+		log.Error(err.Error())
 		return nil, err
 	}
 	if len(recoveries) > 0 {
-		errMsg := fmt.Sprintf("AttemptRecoveryRegistration: Active recovery (id:%v) in the cluster %s:%s for %s", recoveries[0].ID, analysisEntry.ClusterDetails.Keyspace, analysisEntry.ClusterDetails.Shard, recoveries[0].AnalysisEntry.Analysis)
-		log.Errorf(errMsg)
+		errMsg := fmt.Sprintf("AttemptRecoveryRegistration: Active recovery (id:%v) in the cluster %s:%s for %s", recoveries[0].ID, analysisEntry.AnalyzedKeyspace, analysisEntry.AnalyzedShard, recoveries[0].AnalysisEntry.Analysis)
+		log.Error(errMsg)
 		return nil, errors.New(errMsg)
 	}
 
@@ -126,7 +126,7 @@ func AttemptRecoveryRegistration(analysisEntry *inst.ReplicationAnalysis) (*Topo
 
 	topologyRecovery, err = writeTopologyRecovery(topologyRecovery)
 	if err != nil {
-		log.Error(err)
+		log.Error(err.Error())
 		return nil, err
 	}
 	return topologyRecovery, nil
@@ -150,7 +150,7 @@ func writeResolveRecovery(topologyRecovery *TopologyRecovery) error {
 		topologyRecovery.ID,
 	)
 	if err != nil {
-		log.Error(err)
+		log.Error(err.Error())
 	}
 	return err
 }
@@ -180,7 +180,7 @@ func readRecoveries(whereCondition string, limit string, args []any) ([]*Topolog
 		limit,
 	)
 	err := db.QueryVTOrc(query, args, func(m sqlutils.RowMap) error {
-		topologyRecovery := *NewTopologyRecovery(inst.ReplicationAnalysis{})
+		topologyRecovery := *NewTopologyRecovery(inst.DetectionAnalysis{})
 		topologyRecovery.ID = m.GetInt64("recovery_id")
 
 		topologyRecovery.RecoveryStartTimestamp = m.GetString("start_recovery")
@@ -189,8 +189,8 @@ func readRecoveries(whereCondition string, limit string, args []any) ([]*Topolog
 
 		topologyRecovery.AnalysisEntry.AnalyzedInstanceAlias = m.GetString("alias")
 		topologyRecovery.AnalysisEntry.Analysis = inst.AnalysisCode(m.GetString("analysis"))
-		topologyRecovery.AnalysisEntry.ClusterDetails.Keyspace = m.GetString("keyspace")
-		topologyRecovery.AnalysisEntry.ClusterDetails.Shard = m.GetString("shard")
+		topologyRecovery.AnalysisEntry.AnalyzedKeyspace = m.GetString("keyspace")
+		topologyRecovery.AnalysisEntry.AnalyzedShard = m.GetString("shard")
 
 		topologyRecovery.SuccessorAlias = m.GetString("successor_alias")
 
@@ -201,9 +201,8 @@ func readRecoveries(whereCondition string, limit string, args []any) ([]*Topolog
 		res = append(res, &topologyRecovery)
 		return nil
 	})
-
 	if err != nil {
-		log.Error(err)
+		log.Error(err.Error())
 	}
 	return res, err
 }
@@ -223,7 +222,7 @@ func ReadRecentRecoveries(page int) ([]*TopologyRecovery, error) {
 	whereClause := ""
 	var args []any
 	if len(whereConditions) > 0 {
-		whereClause = fmt.Sprintf("WHERE %s", strings.Join(whereConditions, " AND "))
+		whereClause = "WHERE " + strings.Join(whereConditions, " AND ")
 	}
 	limit := `LIMIT ? OFFSET ?`
 	args = append(args, config.AuditPageSize, page*config.AuditPageSize)
@@ -249,12 +248,12 @@ func writeTopologyRecoveryStep(topologyRecoveryStep *TopologyRecoveryStep) error
 		topologyRecoveryStep.Message,
 	)
 	if err != nil {
-		log.Error(err)
+		log.Error(err.Error())
 		return err
 	}
 	topologyRecoveryStep.ID, err = sqlResult.LastInsertId()
 	if err != nil {
-		log.Error(err)
+		log.Error(err.Error())
 	}
 	return err
 }

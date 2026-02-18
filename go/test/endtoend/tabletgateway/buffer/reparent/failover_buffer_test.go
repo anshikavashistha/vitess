@@ -58,7 +58,7 @@ func failoverExternalReparenting(t *testing.T, clusterInstance *cluster.LocalPro
 	minUnavailabilityInS := 1.0
 	if duration.Seconds() < minUnavailabilityInS {
 		w := minUnavailabilityInS - duration.Seconds()
-		log.Infof("Waiting for %.1f seconds because the failover was too fast (took only %.3f seconds)", w, duration.Seconds())
+		log.Info(fmt.Sprintf("Waiting for %.1f seconds because the failover was too fast (took only %.3f seconds)", w, duration.Seconds()))
 		time.Sleep(time.Duration(w) * time.Second)
 	}
 
@@ -78,7 +78,7 @@ func failoverExternalReparenting(t *testing.T, clusterInstance *cluster.LocalPro
 		"STOP REPLICA",
 		resetCmd,
 		fmt.Sprintf("SET GLOBAL gtid_purged = '%s'", gtID),
-		fmt.Sprintf("CHANGE REPLICATION SOURCE TO SOURCE_HOST='%s', SOURCE_PORT=%d, SOURCE_USER='vt_repl', SOURCE_AUTO_POSITION = 1", "localhost", newPrimary.MySQLPort),
+		fmt.Sprintf("CHANGE REPLICATION SOURCE TO SOURCE_HOST='%s', SOURCE_PORT=%d, SOURCE_USER='vt_repl', GET_SOURCE_PUBLIC_KEY = 1, SOURCE_AUTO_POSITION = 1", "localhost", newPrimary.MySQLPort),
 		"START REPLICA",
 	}
 	err = oldPrimary.VttabletProcess.QueryTabletMultiple(changeSourceCommands, keyspaceUnshardedName, true)

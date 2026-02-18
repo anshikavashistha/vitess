@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,7 @@ import (
 	vtgatepb "vitess.io/vitess/go/vt/proto/vtgate"
 	"vitess.io/vitess/go/vt/servenv"
 	"vitess.io/vitess/go/vt/sqlparser"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vtenv"
 	"vitess.io/vitess/go/vt/vterrors"
 	"vitess.io/vitess/go/vt/vttls"
@@ -78,32 +80,34 @@ var (
 	mysqlDrainOnTerm         bool
 
 	mysqlServerFlushDelay = 100 * time.Millisecond
+	mysqlServerMultiQuery = false
 )
 
 func registerPluginFlags(fs *pflag.FlagSet) {
-	fs.IntVar(&mysqlServerPort, "mysql_server_port", mysqlServerPort, "If set, also listen for MySQL binary protocol connections on this port.")
-	fs.StringVar(&mysqlServerBindAddress, "mysql_server_bind_address", mysqlServerBindAddress, "Binds on this address when listening to MySQL binary protocol. Useful to restrict listening to 'localhost' only for instance.")
-	fs.StringVar(&mysqlServerSocketPath, "mysql_server_socket_path", mysqlServerSocketPath, "This option specifies the Unix socket file to use when listening for local connections. By default it will be empty and it won't listen to a unix socket")
-	fs.StringVar(&mysqlTCPVersion, "mysql_tcp_version", mysqlTCPVersion, "Select tcp, tcp4, or tcp6 to control the socket type.")
-	fs.StringVar(&mysqlAuthServerImpl, "mysql_auth_server_impl", mysqlAuthServerImpl, "Which auth server implementation to use. Options: none, ldap, clientcert, static, vault.")
-	fs.BoolVar(&mysqlAllowClearTextWithoutTLS, "mysql_allow_clear_text_without_tls", mysqlAllowClearTextWithoutTLS, "If set, the server will allow the use of a clear text password over non-SSL connections.")
-	fs.BoolVar(&mysqlProxyProtocol, "proxy_protocol", mysqlProxyProtocol, "Enable HAProxy PROXY protocol on MySQL listener socket")
-	fs.BoolVar(&mysqlServerRequireSecureTransport, "mysql_server_require_secure_transport", mysqlServerRequireSecureTransport, "Reject insecure connections but only if mysql_server_ssl_cert and mysql_server_ssl_key are provided")
-	fs.StringVar(&mysqlSslCert, "mysql_server_ssl_cert", mysqlSslCert, "Path to the ssl cert for mysql server plugin SSL")
-	fs.StringVar(&mysqlSslKey, "mysql_server_ssl_key", mysqlSslKey, "Path to ssl key for mysql server plugin SSL")
-	fs.StringVar(&mysqlSslCa, "mysql_server_ssl_ca", mysqlSslCa, "Path to ssl CA for mysql server plugin SSL. If specified, server will require and validate client certs.")
-	fs.StringVar(&mysqlSslCrl, "mysql_server_ssl_crl", mysqlSslCrl, "Path to ssl CRL for mysql server plugin SSL")
-	fs.StringVar(&mysqlTLSMinVersion, "mysql_server_tls_min_version", mysqlTLSMinVersion, "Configures the minimal TLS version negotiated when SSL is enabled. Defaults to TLSv1.2. Options: TLSv1.0, TLSv1.1, TLSv1.2, TLSv1.3.")
-	fs.StringVar(&mysqlSslServerCA, "mysql_server_ssl_server_ca", mysqlSslServerCA, "path to server CA in PEM format, which will be combine with server cert, return full certificate chain to clients")
-	fs.DurationVar(&mysqlSlowConnectWarnThreshold, "mysql_slow_connect_warn_threshold", mysqlSlowConnectWarnThreshold, "Warn if it takes more than the given threshold for a mysql connection to establish")
-	fs.DurationVar(&mysqlConnReadTimeout, "mysql_server_read_timeout", mysqlConnReadTimeout, "connection read timeout")
-	fs.DurationVar(&mysqlConnWriteTimeout, "mysql_server_write_timeout", mysqlConnWriteTimeout, "connection write timeout")
-	fs.DurationVar(&mysqlQueryTimeout, "mysql_server_query_timeout", mysqlQueryTimeout, "mysql query timeout")
+	utils.SetFlagIntVar(fs, &mysqlServerPort, "mysql-server-port", mysqlServerPort, "If set, also listen for MySQL binary protocol connections on this port.")
+	utils.SetFlagStringVar(fs, &mysqlServerBindAddress, "mysql-server-bind-address", mysqlServerBindAddress, "Binds on this address when listening to MySQL binary protocol. Useful to restrict listening to 'localhost' only for instance.")
+	utils.SetFlagStringVar(fs, &mysqlServerSocketPath, "mysql-server-socket-path", mysqlServerSocketPath, "This option specifies the Unix socket file to use when listening for local connections. By default it will be empty and it won't listen to a unix socket")
+	utils.SetFlagStringVar(fs, &mysqlTCPVersion, "mysql-tcp-version", mysqlTCPVersion, "Select tcp, tcp4, or tcp6 to control the socket type.")
+	utils.SetFlagStringVar(fs, &mysqlAuthServerImpl, "mysql-auth-server-impl", mysqlAuthServerImpl, "Which auth server implementation to use. Options: none, ldap, clientcert, static, vault.")
+	utils.SetFlagBoolVar(fs, &mysqlAllowClearTextWithoutTLS, "mysql-allow-clear-text-without-tls", mysqlAllowClearTextWithoutTLS, "If set, the server will allow the use of a clear text password over non-SSL connections.")
+	utils.SetFlagBoolVar(fs, &mysqlProxyProtocol, "proxy-protocol", mysqlProxyProtocol, "Enable HAProxy PROXY protocol on MySQL listener socket")
+	utils.SetFlagBoolVar(fs, &mysqlServerRequireSecureTransport, "mysql-server-require-secure-transport", mysqlServerRequireSecureTransport, "Reject insecure connections but only if mysql-server-ssl-cert and mysql-server-ssl-key are provided")
+	utils.SetFlagStringVar(fs, &mysqlSslCert, "mysql-server-ssl-cert", mysqlSslCert, "Path to the ssl cert for mysql server plugin SSL")
+	utils.SetFlagStringVar(fs, &mysqlSslKey, "mysql-server-ssl-key", mysqlSslKey, "Path to ssl key for mysql server plugin SSL")
+	utils.SetFlagStringVar(fs, &mysqlSslCa, "mysql-server-ssl-ca", mysqlSslCa, "Path to ssl CA for mysql server plugin SSL. If specified, server will require and validate client certs.")
+	utils.SetFlagStringVar(fs, &mysqlSslCrl, "mysql-server-ssl-crl", mysqlSslCrl, "Path to ssl CRL for mysql server plugin SSL")
+	utils.SetFlagStringVar(fs, &mysqlTLSMinVersion, "mysql-server-tls-min-version", mysqlTLSMinVersion, "Configures the minimal TLS version negotiated when SSL is enabled. Defaults to TLSv1.2. Options: TLSv1.0, TLSv1.1, TLSv1.2, TLSv1.3.")
+	utils.SetFlagStringVar(fs, &mysqlSslServerCA, "mysql-server-ssl-server-ca", mysqlSslServerCA, "path to server CA in PEM format, which will be combine with server cert, return full certificate chain to clients")
+	utils.SetFlagDurationVar(fs, &mysqlSlowConnectWarnThreshold, "mysql-slow-connect-warn-threshold", mysqlSlowConnectWarnThreshold, "Warn if it takes more than the given threshold for a mysql connection to establish")
+	utils.SetFlagDurationVar(fs, &mysqlConnReadTimeout, "mysql-server-read-timeout", mysqlConnReadTimeout, "connection read timeout")
+	utils.SetFlagDurationVar(fs, &mysqlConnWriteTimeout, "mysql-server-write-timeout", mysqlConnWriteTimeout, "connection write timeout")
+	utils.SetFlagDurationVar(fs, &mysqlQueryTimeout, "mysql-server-query-timeout", mysqlQueryTimeout, "mysql query timeout")
 	fs.BoolVar(&mysqlConnBufferPooling, "mysql-server-pool-conn-read-buffers", mysqlConnBufferPooling, "If set, the server will pool incoming connection read buffers")
 	fs.DurationVar(&mysqlKeepAlivePeriod, "mysql-server-keepalive-period", mysqlKeepAlivePeriod, "TCP period between keep-alives")
-	fs.DurationVar(&mysqlServerFlushDelay, "mysql_server_flush_delay", mysqlServerFlushDelay, "Delay after which buffered response will be flushed to the client.")
-	fs.StringVar(&mysqlDefaultWorkloadName, "mysql_default_workload", mysqlDefaultWorkloadName, "Default session workload (OLTP, OLAP, DBA)")
-	fs.BoolVar(&mysqlDrainOnTerm, "mysql-server-drain-onterm", mysqlDrainOnTerm, "If set, the server waits for --onterm_timeout for already connected clients to complete their in flight work")
+	utils.SetFlagDurationVar(fs, &mysqlServerFlushDelay, "mysql-server-flush-delay", mysqlServerFlushDelay, "Delay after which buffered response will be flushed to the client.")
+	utils.SetFlagStringVar(fs, &mysqlDefaultWorkloadName, "mysql-default-workload", mysqlDefaultWorkloadName, "Default session workload (OLTP, OLAP, DBA)")
+	fs.BoolVar(&mysqlDrainOnTerm, "mysql-server-drain-onterm", mysqlDrainOnTerm, "If set, the server waits for --onterm-timeout for already connected clients to complete their in flight work")
+	utils.SetFlagBoolVar(fs, &mysqlServerMultiQuery, "mysql-server-multi-query-protocol", mysqlServerMultiQuery, "If set, the server will use the new implementation of handling queries where-in multiple queries are sent together.")
 }
 
 // vtgateHandler implements the Listener interface.
@@ -145,7 +149,7 @@ func (vh *vtgateHandler) ComResetConnection(c *mysql.Conn) {
 	}
 	err := vh.vtg.CloseSession(ctx, session)
 	if err != nil {
-		log.Errorf("Error happened in transaction rollback: %v", err)
+		log.Error(fmt.Sprintf("Error happened in transaction rollback: %v", err))
 	}
 }
 
@@ -178,7 +182,8 @@ var r = regexp.MustCompile(`/\*VT_SPAN_CONTEXT=(.*)\*/`)
 // this function is here to make this logic easy to test by decoupling the logic from the `trace.NewSpan` and `trace.NewFromString` functions
 func startSpanTestable(ctx context.Context, query, label string,
 	newSpan func(context.Context, string) (trace.Span, context.Context),
-	newSpanFromString func(context.Context, string, string) (trace.Span, context.Context, error)) (trace.Span, context.Context, error) {
+	newSpanFromString func(context.Context, string, string) (trace.Span, context.Context, error),
+) (trace.Span, context.Context, error) {
 	_, comments := sqlparser.SplitMarginComments(query)
 	match := r.FindStringSubmatch(comments.Leading)
 	span, ctx := getSpan(ctx, match, newSpan, label, newSpanFromString)
@@ -196,7 +201,7 @@ func getSpan(ctx context.Context, match []string, newSpan func(context.Context, 
 		if err == nil {
 			return span, ctx
 		}
-		log.Warningf("Unable to parse VT_SPAN_CONTEXT: %s", err.Error())
+		log.Warn("Unable to parse VT_SPAN_CONTEXT: " + err.Error())
 	}
 	span, ctx = newSpan(ctx, label)
 	return span, ctx
@@ -258,13 +263,96 @@ func (vh *vtgateHandler) ComQuery(c *mysql.Conn, query string, callback func(*sq
 		fillInTxStatusFlags(c, session)
 		return nil
 	}
-	session, result, err := vh.vtg.Execute(ctx, vh, session, query, make(map[string]*querypb.BindVariable))
+	session, result, err := vh.vtg.Execute(ctx, vh, session, query, make(map[string]*querypb.BindVariable), false)
 
 	if err := sqlerror.NewSQLErrorFromError(err); err != nil {
 		return err
 	}
 	fillInTxStatusFlags(c, session)
 	return callback(result)
+}
+
+// ComQueryMulti is a newer version of ComQuery that supports running multiple queries in a single call.
+func (vh *vtgateHandler) ComQueryMulti(c *mysql.Conn, sql string, callback func(qr sqltypes.QueryResponse, more bool, firstPacket bool) error) error {
+	session := vh.session(c)
+	if c.IsShuttingDown() && !session.InTransaction {
+		c.MarkForClose()
+		return sqlerror.NewSQLError(sqlerror.ERServerShutdown, sqlerror.SSNetError, "Server shutdown in progress")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c.UpdateCancelCtx(cancel)
+
+	span, ctx, err := startSpan(ctx, sql, "vtgateHandler.ComQueryMulti")
+	if err != nil {
+		return vterrors.Wrap(err, "failed to extract span")
+	}
+	defer span.Finish()
+
+	ctx = callinfo.MysqlCallInfo(ctx, c)
+
+	// Fill in the ImmediateCallerID with the UserData returned by
+	// the AuthServer plugin for that user. If nothing was
+	// returned, use the User. This lets the plugin map a MySQL
+	// user used for authentication to a Vitess User used for
+	// Table ACLs and Vitess authentication in general.
+	im := c.UserData.Get()
+	ef := callerid.NewEffectiveCallerID(
+		c.User,                  /* principal: who */
+		c.RemoteAddr().String(), /* component: running client process */
+		"VTGate MySQL Connector" /* subcomponent: part of the client */)
+	ctx = callerid.NewContext(ctx, ef, im)
+
+	if !session.InTransaction {
+		vh.busyConnections.Add(1)
+	}
+	defer func() {
+		if !session.InTransaction {
+			vh.busyConnections.Add(-1)
+		}
+	}()
+
+	if session.Options.Workload == querypb.ExecuteOptions_OLAP {
+		if c.Capabilities&mysql.CapabilityClientMultiStatements != 0 {
+			session, err = vh.vtg.StreamExecuteMulti(ctx, vh, session, sql, callback)
+		} else {
+			firstPacket := true
+			session, err = vh.vtg.StreamExecute(ctx, vh, session, sql, make(map[string]*querypb.BindVariable), func(result *sqltypes.Result) error {
+				defer func() {
+					firstPacket = false
+				}()
+				return callback(sqltypes.QueryResponse{QueryResult: result}, false, firstPacket)
+			})
+		}
+		if err != nil {
+			return sqlerror.NewSQLErrorFromError(err)
+		}
+		fillInTxStatusFlags(c, session)
+		return nil
+	}
+	var results []*sqltypes.Result
+	var result *sqltypes.Result
+	var queryResults []sqltypes.QueryResponse
+	if c.Capabilities&mysql.CapabilityClientMultiStatements != 0 {
+		session, results, err = vh.vtg.ExecuteMulti(ctx, vh, session, sql)
+		for _, res := range results {
+			queryResults = append(queryResults, sqltypes.QueryResponse{QueryResult: res})
+		}
+		if err != nil {
+			queryResults = append(queryResults, sqltypes.QueryResponse{QueryError: sqlerror.NewSQLErrorFromError(err)})
+		}
+	} else {
+		session, result, err = vh.vtg.Execute(ctx, vh, session, sql, make(map[string]*querypb.BindVariable), false)
+		queryResults = append(queryResults, sqltypes.QueryResponse{QueryResult: result, QueryError: sqlerror.NewSQLErrorFromError(err)})
+	}
+
+	fillInTxStatusFlags(c, session)
+	for idx, res := range queryResults {
+		if callbackErr := callback(res, idx < len(queryResults)-1, true); callbackErr != nil {
+			return callbackErr
+		}
+	}
+	return nil
 }
 
 func fillInTxStatusFlags(c *mysql.Conn, session *vtgatepb.Session) {
@@ -281,7 +369,7 @@ func fillInTxStatusFlags(c *mysql.Conn, session *vtgatepb.Session) {
 }
 
 // ComPrepare is the handler for command prepare.
-func (vh *vtgateHandler) ComPrepare(c *mysql.Conn, query string, bindVars map[string]*querypb.BindVariable) ([]*querypb.Field, error) {
+func (vh *vtgateHandler) ComPrepare(c *mysql.Conn, query string) ([]*querypb.Field, uint16, error) {
 	var ctx context.Context
 	var cancel context.CancelFunc
 	if mysqlQueryTimeout != 0 {
@@ -315,12 +403,12 @@ func (vh *vtgateHandler) ComPrepare(c *mysql.Conn, query string, bindVars map[st
 		}
 	}()
 
-	session, fld, err := vh.vtg.Prepare(ctx, session, query, bindVars)
+	session, fld, paramsCount, err := vh.vtg.Prepare(ctx, session, query)
 	err = sqlerror.NewSQLErrorFromError(err)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return fld, nil
+	return fld, paramsCount, nil
 }
 
 func (vh *vtgateHandler) ComStmtExecute(c *mysql.Conn, prepare *mysql.PrepareData, callback func(*sqltypes.Result) error) error {
@@ -364,7 +452,7 @@ func (vh *vtgateHandler) ComStmtExecute(c *mysql.Conn, prepare *mysql.PrepareDat
 		fillInTxStatusFlags(c, session)
 		return nil
 	}
-	_, qr, err := vh.vtg.Execute(ctx, vh, session, prepare.PrepareStmt, prepare.BindVars)
+	_, qr, err := vh.vtg.Execute(ctx, vh, session, prepare.PrepareStmt, prepare.BindVars, true)
 	if err != nil {
 		return sqlerror.NewSQLErrorFromError(err)
 	}
@@ -463,7 +551,8 @@ type mysqlServer struct {
 func initTLSConfig(ctx context.Context, srv *mysqlServer, mysqlSslCert, mysqlSslKey, mysqlSslCa, mysqlSslCrl, mysqlSslServerCA string, mysqlServerRequireSecureTransport bool, mysqlMinTLSVersion uint16) error {
 	serverConfig, err := vttls.ServerConfig(mysqlSslCert, mysqlSslKey, mysqlSslCa, mysqlSslCrl, mysqlSslServerCA, mysqlMinTLSVersion)
 	if err != nil {
-		log.Exitf("grpcutils.TLSServerConfig failed: %v", err)
+		log.Error(fmt.Sprintf("grpcutils.TLSServerConfig failed: %v", err))
+		os.Exit(1)
 		return err
 	}
 	srv.tcpListener.TLSConfig.Store(serverConfig)
@@ -478,7 +567,7 @@ func initTLSConfig(ctx context.Context, srv *mysqlServer, mysqlSslCert, mysqlSsl
 			case <-srv.sigChan:
 				serverConfig, err := vttls.ServerConfig(mysqlSslCert, mysqlSslKey, mysqlSslCa, mysqlSslCrl, mysqlSslServerCA, mysqlMinTLSVersion)
 				if err != nil {
-					log.Errorf("grpcutils.TLSServerConfig failed: %v", err)
+					log.Error(fmt.Sprintf("grpcutils.TLSServerConfig failed: %v", err))
 				} else {
 					log.Info("grpcutils.TLSServerConfig updated")
 					srv.tcpListener.TLSConfig.Store(serverConfig)
@@ -508,17 +597,19 @@ func initMySQLProtocol(vtgate *VTGate) *mysqlServer {
 	}
 	authServer := mysql.GetAuthServer(mysqlAuthServerImpl)
 
-	// Check mysql_default_workload
+	// Check mysql-default-workload
 	var ok bool
 	if mysqlDefaultWorkload, ok = querypb.ExecuteOptions_Workload_value[strings.ToUpper(mysqlDefaultWorkloadName)]; !ok {
-		log.Exitf("-mysql_default_workload must be one of [OLTP, OLAP, DBA, UNSPECIFIED]")
+		log.Error("-mysql-default-workload must be one of [OLTP, OLAP, DBA, UNSPECIFIED]")
+		os.Exit(1)
 	}
 
 	switch mysqlTCPVersion {
 	case "tcp", "tcp4", "tcp6":
 		// Valid flag value.
 	default:
-		log.Exitf("-mysql_tcp_version must be one of [tcp, tcp4, tcp6]")
+		log.Error("-mysql-tcp-version must be one of [tcp, tcp4, tcp6]")
+		os.Exit(1)
 	}
 
 	// Create a Listener.
@@ -526,9 +617,13 @@ func initMySQLProtocol(vtgate *VTGate) *mysqlServer {
 	srv := &mysqlServer{}
 	srv.vtgateHandle = newVtgateHandler(vtgate)
 	if mysqlServerPort >= 0 {
-		srv.tcpListener, err = mysql.NewListener(
-			mysqlTCPVersion,
-			net.JoinHostPort(mysqlServerBindAddress, fmt.Sprintf("%v", mysqlServerPort)),
+		listener, err := servenv.Listen(mysqlTCPVersion, net.JoinHostPort(mysqlServerBindAddress, strconv.Itoa(mysqlServerPort)))
+		if err != nil {
+			log.Error(fmt.Sprintf("servenv.Listen failed: %v", err))
+			os.Exit(1)
+		}
+		srv.tcpListener, err = mysql.NewFromListener(
+			listener,
 			authServer,
 			srv.vtgateHandle,
 			mysqlConnReadTimeout,
@@ -537,14 +632,17 @@ func initMySQLProtocol(vtgate *VTGate) *mysqlServer {
 			mysqlConnBufferPooling,
 			mysqlKeepAlivePeriod,
 			mysqlServerFlushDelay,
+			mysqlServerMultiQuery,
 		)
 		if err != nil {
-			log.Exitf("mysql.NewListener failed: %v", err)
+			log.Error(fmt.Sprintf("mysql.NewFromListener failed: %v", err))
+			os.Exit(1)
 		}
 		if mysqlSslCert != "" && mysqlSslKey != "" {
 			tlsVersion, err := vttls.TLSVersionToNumber(mysqlTLSMinVersion)
 			if err != nil {
-				log.Exitf("mysql.NewListener failed: %v", err)
+				log.Error(fmt.Sprintf("mysql.NewFromListener failed: %v", err))
+				os.Exit(1)
 			}
 
 			_ = initTLSConfig(context.Background(), srv, mysqlSslCert, mysqlSslKey, mysqlSslCa, mysqlSslCrl, mysqlSslServerCA, mysqlServerRequireSecureTransport, tlsVersion)
@@ -552,7 +650,7 @@ func initMySQLProtocol(vtgate *VTGate) *mysqlServer {
 		srv.tcpListener.AllowClearTextWithoutTLS.Store(mysqlAllowClearTextWithoutTLS)
 		// Check for the connection threshold
 		if mysqlSlowConnectWarnThreshold != 0 {
-			log.Infof("setting mysql slow connection threshold to %v", mysqlSlowConnectWarnThreshold)
+			log.Info(fmt.Sprintf("setting mysql slow connection threshold to %v", mysqlSlowConnectWarnThreshold))
 			srv.tcpListener.SlowConnectWarnThreshold.Store(mysqlSlowConnectWarnThreshold.Nanoseconds())
 		}
 		// Start listening for tcp
@@ -562,7 +660,8 @@ func initMySQLProtocol(vtgate *VTGate) *mysqlServer {
 	if mysqlServerSocketPath != "" {
 		err = setupUnixSocket(srv, authServer, mysqlServerSocketPath)
 		if err != nil {
-			log.Exitf("mysql.NewListener failed: %v", err)
+			log.Error(fmt.Sprintf("mysql.NewListener failed: %v", err))
+			os.Exit(1)
 		}
 	}
 	return srv
@@ -582,13 +681,14 @@ func newMysqlUnixSocket(address string, authServer mysql.AuthServer, handler mys
 		mysqlConnBufferPooling,
 		mysqlKeepAlivePeriod,
 		mysqlServerFlushDelay,
+		mysqlServerMultiQuery,
 	)
 
 	switch err := err.(type) {
 	case nil:
 		return listener, nil
 	case *net.OpError:
-		log.Warningf("Found existent socket when trying to create new unix mysql listener: %s, attempting to clean up", address)
+		log.Warn(fmt.Sprintf("Found existent socket when trying to create new unix mysql listener: %s, attempting to clean up", address))
 		// err.Op should never be different from listen, just being extra careful
 		// in case in the future other errors are returned here
 		if err.Op != "listen" {
@@ -596,12 +696,12 @@ func newMysqlUnixSocket(address string, authServer mysql.AuthServer, handler mys
 		}
 		_, dialErr := net.Dial("unix", address)
 		if dialErr == nil {
-			log.Errorf("Existent socket '%s' is still accepting connections, aborting", address)
+			log.Error(fmt.Sprintf("Existent socket '%s' is still accepting connections, aborting", address))
 			return nil, err
 		}
 		removeFileErr := os.Remove(address)
 		if removeFileErr != nil {
-			log.Errorf("Couldn't remove existent socket file: %s", address)
+			log.Error("Couldn't remove existent socket file: " + address)
 			return nil, err
 		}
 		listener, listenerErr := mysql.NewListener(
@@ -615,6 +715,7 @@ func newMysqlUnixSocket(address string, authServer mysql.AuthServer, handler mys
 			mysqlConnBufferPooling,
 			mysqlKeepAlivePeriod,
 			mysqlServerFlushDelay,
+			mysqlServerMultiQuery,
 		)
 		return listener, listenerErr
 	default:
@@ -636,11 +737,11 @@ func (srv *mysqlServer) shutdownMysqlProtocolAndDrain() {
 		stopListener(srv.tcpListener, false)
 		setListenerToNil()
 		// We wait for connected clients to drain by themselves or to run into the onterm timeout
-		log.Infof("Starting drain loop, waiting for all clients to disconnect")
+		log.Info("Starting drain loop, waiting for all clients to disconnect")
 		reported := time.Now()
 		for srv.vtgateHandle.numConnections() > 0 {
 			if time.Since(reported) > 2*time.Second {
-				log.Infof("Still waiting for client connections to drain (%d connected)...", srv.vtgateHandle.numConnections())
+				log.Info(fmt.Sprintf("Still waiting for client connections to drain (%d connected)...", srv.vtgateHandle.numConnections()))
 				reported = time.Now()
 			}
 			time.Sleep(1000 * time.Millisecond)
@@ -652,12 +753,12 @@ func (srv *mysqlServer) shutdownMysqlProtocolAndDrain() {
 	stopListener(srv.tcpListener, true)
 	setListenerToNil()
 	if busy := srv.vtgateHandle.busyConnections.Load(); busy > 0 {
-		log.Infof("Waiting for all client connections to be idle (%d active)...", busy)
+		log.Info(fmt.Sprintf("Waiting for all client connections to be idle (%d active)...", busy))
 		start := time.Now()
 		reported := start
 		for busy > 0 {
 			if time.Since(reported) > 2*time.Second {
-				log.Infof("Still waiting for client connections to be idle (%d active)...", busy)
+				log.Info(fmt.Sprintf("Still waiting for client connections to be idle (%d active)...", busy))
 				reported = time.Now()
 			}
 
@@ -694,7 +795,7 @@ func (srv *mysqlServer) rollbackAtShutdown() {
 			defer srv.vtgateHandle.mu.Unlock()
 			for id, c := range srv.vtgateHandle.connections {
 				if c != nil {
-					log.Infof("Rolling back transactions associated with connection ID: %v", id)
+					log.Info(fmt.Sprintf("Rolling back transactions associated with connection ID: %v", id))
 					c.Close()
 				}
 			}
@@ -703,14 +804,14 @@ func (srv *mysqlServer) rollbackAtShutdown() {
 
 	// If vtgate is instead busy executing a query, the number of open conns
 	// will be non-zero. Give another second for those queries to finish.
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if srv.vtgateHandle.numConnections() == 0 {
-			log.Infof("All connections have been rolled back.")
+			log.Info("All connections have been rolled back.")
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	log.Errorf("All connections did not go idle. Shutting down anyway.")
+	log.Error("All connections did not go idle. Shutting down anyway.")
 }
 
 func mysqlSocketPath() string {
@@ -718,6 +819,11 @@ func mysqlSocketPath() string {
 		return ""
 	}
 	return mysqlServerSocketPath
+}
+
+// GetMysqlServerSSLCA returns the current value of the mysql-server-ssl-ca flag
+func GetMysqlServerSSLCA() string {
+	return mysqlSslCa
 }
 
 func init() {

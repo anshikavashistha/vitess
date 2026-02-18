@@ -23,6 +23,7 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vtenv"
 
 	"vitess.io/vitess/go/vt/servenv"
@@ -35,9 +36,7 @@ import (
 	vtctldatapb "vitess.io/vitess/go/vt/proto/vtctldata"
 )
 
-var (
-	sanitizeLogMessages = false
-)
+var sanitizeLogMessages = false
 
 func init() {
 	for _, cmd := range []string{"vtcombo", "vtctld"} {
@@ -46,7 +45,7 @@ func init() {
 }
 
 func registerVtctldFlags(fs *pflag.FlagSet) {
-	fs.BoolVar(&sanitizeLogMessages, "vtctld_sanitize_log_messages", sanitizeLogMessages, "When true, vtctld sanitizes logging.")
+	utils.SetFlagBoolVar(fs, &sanitizeLogMessages, "vtctld-sanitize-log-messages", sanitizeLogMessages, "When true, vtctld sanitizes logging.")
 }
 
 // InitVtctld initializes all the vtctld functionality.

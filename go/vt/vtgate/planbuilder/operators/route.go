@@ -18,6 +18,8 @@ package operators
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 
 	"vitess.io/vitess/go/slice"
 	"vitess.io/vitess/go/vt/key"
@@ -26,6 +28,7 @@ import (
 	"vitess.io/vitess/go/vt/vterrors"
 	"vitess.io/vitess/go/vt/vtgate/engine"
 	"vitess.io/vitess/go/vt/vtgate/evalengine"
+	"vitess.io/vitess/go/vt/vtgate/planbuilder/operators/predicates"
 	"vitess.io/vitess/go/vt/vtgate/planbuilder/plancontext"
 	"vitess.io/vitess/go/vt/vtgate/semantics"
 	"vitess.io/vitess/go/vt/vtgate/vindexes"
@@ -44,6 +47,10 @@ type (
 
 		Comments *sqlparser.ParsedComments
 		Lock     sqlparser.Lock
+
+		// If this query has been planned using deferred optimization,
+		// this field will contain the conditions under which this route is valid
+		Conditions []engine.Condition
 
 		ResultColumns int
 	}
@@ -104,11 +111,13 @@ type (
 		// updateRoutingLogic updates the routing to take predicates into account. This can be used for routing
 		// using vindexes or for figuring out which keyspace an information_schema query should be sent to.
 		updateRoutingLogic(ctx *plancontext.PlanningContext, expr sqlparser.Expr) Routing
+
+		resetRoutingLogic(ctx *plancontext.PlanningContext) Routing
 	}
 )
 
 // UpdateRoutingLogic first checks if we are dealing with a predicate that
-func UpdateRoutingLogic(ctx *plancontext.PlanningContext, expr sqlparser.Expr, r Routing) Routing {
+func UpdateRoutingLogic(ctx *plancontext.PlanningContext, in sqlparser.Expr, r Routing) Routing {
 	ks := r.Keyspace()
 	if ks == nil {
 		var err error
@@ -119,12 +128,19 @@ func UpdateRoutingLogic(ctx *plancontext.PlanningContext, expr sqlparser.Expr, r
 	}
 	nr := &NoneRouting{keyspace: ks}
 
+	expr := in
+	// If we have a JoinPredicate, let's get the inner expression
+	pred, isJP := in.(*predicates.JoinPredicate)
+	if isJP {
+		expr = pred.Current()
+	}
+
 	if b := ctx.IsConstantBool(expr); b != nil && !*b {
 		return nr
 	}
 
 	exit := func() Routing {
-		return r.updateRoutingLogic(ctx, expr)
+		return r.updateRoutingLogic(ctx, in)
 	}
 
 	// For some expressions, even if we can't evaluate them, we know that they will always return false or null
@@ -145,17 +161,16 @@ func UpdateRoutingLogic(ctx *plancontext.PlanningContext, expr sqlparser.Expr, r
 
 	switch cmp.Operator {
 	case sqlparser.NotInOp:
-		for _, n := range tuples {
-			// If any of the values in the tuple is a literal null, we know that this comparison will always return NULL
-			if sqlparser.IsNull(n) {
-				return nr
-			}
+		if slices.ContainsFunc(tuples, sqlparser.IsNull) {
+			return nr
 		}
 	case sqlparser.InOp:
 		// WHERE col IN (null)
 		if len(tuples) == 1 && sqlparser.IsNull(tuples[0]) {
 			return nr
 		}
+	default:
+		// We only have special handling of IN and NOT IN for now
 	}
 
 	return exit()
@@ -199,9 +214,7 @@ func copyOption(orig *VindexOption) *VindexOption {
 	copy(values, orig.Values)
 	copy(valueExprs, orig.ValueExprs)
 	copy(predicates, orig.Predicates)
-	for k, v := range orig.ColsSeen {
-		colsSeen[k] = v
-	}
+	maps.Copy(colsSeen, orig.ColsSeen)
 	vo := &VindexOption{
 		Values:      values,
 		ColsSeen:    colsSeen,
@@ -349,7 +362,24 @@ func findVSchemaTableAndCreateRoute(
 	tableName sqlparser.TableName,
 	planAlternates bool,
 ) *Route {
-	vschemaTable, _, _, tabletType, target, err := ctx.VSchema.FindTableOrVindex(tableName)
+	var (
+		vschemaTable *vindexes.BaseTable
+		tabletType   topodatapb.TabletType
+		target       key.ShardDestination
+		err          error
+	)
+
+	vschemaTable, _, _, tabletType, target, err = ctx.VSchema.FindTableOrVindex(tableName)
+
+	// If we're processing the target-side of a mirror operator, look up the
+	// mirror target table by using FindTable, which bypasses routing rules.
+	//
+	// Exclude dual tables, which do not get a mirror rule, and are not known to
+	// the VSchema.
+	if ctx.IsMirrored() && (vschemaTable.Type != vindexes.TypeReference || vschemaTable.Name.String() != "dual") {
+		vschemaTable, _, tabletType, target, err = ctx.VSchema.FindTable(tableName)
+	}
+
 	if err != nil {
 		panic(err)
 	}
@@ -365,7 +395,7 @@ func findVSchemaTableAndCreateRoute(
 	)
 }
 
-func createTargetedRouting(ctx *plancontext.PlanningContext, target key.Destination, tabletType topodatapb.TabletType, vschemaTable *vindexes.BaseTable) Routing {
+func createTargetedRouting(ctx *plancontext.PlanningContext, target key.ShardDestination, tabletType topodatapb.TabletType, vschemaTable *vindexes.BaseTable) Routing {
 	switch ctx.Statement.(type) {
 	case *sqlparser.Update:
 		if tabletType != topodatapb.TabletType_PRIMARY {
@@ -539,8 +569,6 @@ func createProjection(ctx *plancontext.PlanningContext, src Operator, derivedNam
 }
 
 func (r *Route) AddColumn(ctx *plancontext.PlanningContext, reuse bool, gb bool, expr *sqlparser.AliasedExpr) int {
-	removeKeyspaceFromSelectExpr(expr)
-
 	if reuse {
 		offset := r.FindCol(ctx, expr.Expr, true)
 		if offset != -1 {
@@ -585,7 +613,6 @@ func addColumnToInput(
 	var src Operator
 	var updateSrc func(Operator)
 	switch op := operator.(type) {
-
 	// Pass through operators - we can just add the columns to their source
 	case *SubQuery:
 		src, updateSrc = op.Outer, func(newSrc Operator) { op.Outer = newSrc }
@@ -664,6 +691,16 @@ func addWSColumnToInput(ctx *plancontext.PlanningContext, source Operator, offse
 		return true, op.AddWSColumn(ctx, offset, true)
 	case *Aggregator:
 		return true, op.AddWSColumn(ctx, offset, true)
+	case *Union:
+		cloned := slice.Map(op.Sources, func(src Operator) Operator {
+			return Clone(src)
+		})
+		wsOffset, err := op.addWeightStringToOffset(ctx, offset)
+		if err != nil {
+			op.Sources = cloned
+			return false, -1
+		}
+		return true, wsOffset
 	}
 	return false, -1
 }

@@ -197,8 +197,7 @@ func TestReloadSchema(t *testing.T) {
 
 	for _, testcase := range testcases {
 		t.Run(testcase.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 			db := fakesqldb.New(t)
 			defer db.Close()
 			cfg := newConfig(db)
@@ -335,8 +334,7 @@ func TestReloadSchema(t *testing.T) {
 
 // TestReloadView tests that the health streamer tracks view changes correctly
 func TestReloadView(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	db := fakesqldb.New(t)
 	defer db.Close()
 	cfg := newConfig(db)
@@ -404,6 +402,10 @@ func TestReloadView(t *testing.T) {
 	db.AddQuery("SELECT TABLE_NAME, CREATE_TIME FROM _vt.`tables`", &sqltypes.Result{})
 	// adding query pattern for udfs
 	db.AddQueryPattern("SELECT name.*", &sqltypes.Result{})
+	db.AddQuery(mysql.ShowPartitons, &sqltypes.Result{})
+	db.AddQuery(mysql.ShowTableRowCountClusteredIndex, &sqltypes.Result{})
+	db.AddQuery(mysql.ShowIndexSizes, &sqltypes.Result{})
+	db.AddQuery(mysql.ShowIndexCardinalities, &sqltypes.Result{})
 
 	se.InitDBConfig(cfg.DB.DbaWithDB())
 	hs.Open()
@@ -444,14 +446,16 @@ func TestReloadView(t *testing.T) {
 			showTablesWithSizesOutput: sqltypes.MakeTestResult(showTableSizesFields, "view_a|VIEW|12345678||123|123", "view_b|VIEW|12345678||123|123"),
 			viewDefinitionsOutput: sqltypes.MakeTestResult(sqltypes.MakeTestFields("table_name|view_definition", "varchar|text"),
 				"view_a|def_a", "view_b|def_b"),
-			createStmtOutput: []*sqltypes.Result{sqltypes.MakeTestResult(showCreateViewFields, "view_a|create_view_a|utf8|utf8_general_ci"),
-				sqltypes.MakeTestResult(showCreateViewFields, "view_b|create_view_b|utf8|utf8_general_ci")},
+			createStmtOutput: []*sqltypes.Result{
+				sqltypes.MakeTestResult(showCreateViewFields, "view_a|create_view_a|utf8|utf8_general_ci"),
+				sqltypes.MakeTestResult(showCreateViewFields, "view_b|create_view_b|utf8|utf8_general_ci"),
+			},
 			expViewsChanged:            []string{"view_a", "view_b"},
 			expGetViewDefinitionsQuery: "select table_name, view_definition from information_schema.views where table_schema = database() and table_name in ('view_a', 'view_b')",
 			expCreateStmtQuery:         []string{"show create table view_a", "show create table view_b"},
 			expClearQuery: []string{
-				"delete from _vt.views where TABLE_SCHEMA = database() and TABLE_NAME in ('view_a', 'view_b')",
-				"delete from _vt.views where TABLE_SCHEMA = database() and TABLE_NAME in ('view_b', 'view_a')",
+				"delete from _vt.views where TABLE_SCHEMA = database() and `TABLE_NAME` in ('view_a', 'view_b')",
+				"delete from _vt.views where TABLE_SCHEMA = database() and `TABLE_NAME` in ('view_b', 'view_a')",
 			},
 			expInsertQuery: []string{
 				"insert into _vt.views(TABLE_SCHEMA, TABLE_NAME, CREATE_STATEMENT, VIEW_DEFINITION) values (database(), 'view_a', 'create_view_a', 'def_a')",
@@ -469,7 +473,7 @@ func TestReloadView(t *testing.T) {
 			expViewsChanged:            []string{"view_b"},
 			expGetViewDefinitionsQuery: "select table_name, view_definition from information_schema.views where table_schema = database() and table_name in ('view_b')",
 			expCreateStmtQuery:         []string{"show create table view_b"},
-			expClearQuery:              []string{"delete from _vt.views where TABLE_SCHEMA = database() and TABLE_NAME in ('view_b')"},
+			expClearQuery:              []string{"delete from _vt.views where TABLE_SCHEMA = database() and `TABLE_NAME` in ('view_b')"},
 			expInsertQuery: []string{
 				"insert into _vt.views(TABLE_SCHEMA, TABLE_NAME, CREATE_STATEMENT, VIEW_DEFINITION) values (database(), 'view_b', 'create_view_mod_b', 'def_mod_b')",
 			},
@@ -481,18 +485,20 @@ func TestReloadView(t *testing.T) {
 				"view_a", "view_b", "view_c"),
 			viewDefinitionsOutput: sqltypes.MakeTestResult(sqltypes.MakeTestFields("table_name|view_definition", "varchar|text"),
 				"view_a|def_mod_a", "view_c|def_c"),
-			createStmtOutput: []*sqltypes.Result{sqltypes.MakeTestResult(showCreateViewFields, "view_a|create_view_mod_a|utf8|utf8_general_ci"),
-				sqltypes.MakeTestResult(showCreateViewFields, "view_c|create_view_c|utf8|utf8_general_ci")},
+			createStmtOutput: []*sqltypes.Result{
+				sqltypes.MakeTestResult(showCreateViewFields, "view_a|create_view_mod_a|utf8|utf8_general_ci"),
+				sqltypes.MakeTestResult(showCreateViewFields, "view_c|create_view_c|utf8|utf8_general_ci"),
+			},
 			expViewsChanged:            []string{"view_a", "view_b", "view_c"},
 			expGetViewDefinitionsQuery: "select table_name, view_definition from information_schema.views where table_schema = database() and table_name in ('view_b', 'view_c', 'view_a')",
 			expCreateStmtQuery:         []string{"show create table view_a", "show create table view_c"},
 			expClearQuery: []string{
-				"delete from _vt.views where table_schema = database() and table_name in ('view_a', 'view_b', 'view_c')",
-				"delete from _vt.views where table_schema = database() and table_name in ('view_a', 'view_c', 'view_b')",
-				"delete from _vt.views where table_schema = database() and table_name in ('view_b', 'view_a', 'view_c')",
-				"delete from _vt.views where table_schema = database() and table_name in ('view_b', 'view_c', 'view_a')",
-				"delete from _vt.views where table_schema = database() and table_name in ('view_c', 'view_a', 'view_b')",
-				"delete from _vt.views where table_schema = database() and table_name in ('view_c', 'view_b', 'view_a')",
+				"delete from _vt.views where table_schema = database() and `table_name` in ('view_a', 'view_b', 'view_c')",
+				"delete from _vt.views where table_schema = database() and `table_name` in ('view_a', 'view_c', 'view_b')",
+				"delete from _vt.views where table_schema = database() and `table_name` in ('view_b', 'view_a', 'view_c')",
+				"delete from _vt.views where table_schema = database() and `table_name` in ('view_b', 'view_c', 'view_a')",
+				"delete from _vt.views where table_schema = database() and `table_name` in ('view_c', 'view_a', 'view_b')",
+				"delete from _vt.views where table_schema = database() and `table_name` in ('view_c', 'view_b', 'view_a')",
 			},
 			expInsertQuery: []string{
 				"insert into _vt.views(TABLE_SCHEMA, TABLE_NAME, CREATE_STATEMENT, VIEW_DEFINITION) values (database(), 'view_a', 'create_view_mod_a', 'def_mod_a')",
@@ -596,7 +602,7 @@ func TestDeadlockBwCloseAndReload(t *testing.T) {
 	// This reproduces the deadlock quite readily.
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			hs.Close()
 			hs.Open()
 			hs.MakePrimary(true)
@@ -605,7 +611,7 @@ func TestDeadlockBwCloseAndReload(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			se.BroadcastForTesting(nil, nil, nil, true)
 		}
 	}()

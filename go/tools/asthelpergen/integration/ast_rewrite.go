@@ -47,6 +47,8 @@ func (a *application) rewriteAST(parent AST, node AST, replacer replacerFunc) bo
 		return a.rewriteValueContainer(parent, node, replacer)
 	case ValueSliceContainer:
 		return a.rewriteValueSliceContainer(parent, node, replacer)
+	case Visitable:
+		return a.rewriteVisitable(parent, node, replacer)
 	default:
 		// this should never happen
 		return true
@@ -532,6 +534,8 @@ func (a *application) rewriteSubIface(parent AST, node SubIface, replacer replac
 	switch node := node.(type) {
 	case *SubImpl:
 		return a.rewriteRefOfSubImpl(parent, node, replacer)
+	case Visitable:
+		return a.rewriteVisitable(parent, node, replacer)
 	default:
 		// this should never happen
 		return true
@@ -686,6 +690,42 @@ func (a *application) rewriteRefOfValueSliceContainer(parent AST, node *ValueSli
 	}
 	if !a.rewriteLeafSlice(node, node.ASTImplementationElements, func(newNode, parent AST) {
 		parent.(*ValueSliceContainer).ASTImplementationElements = newNode.(LeafSlice)
+	}) {
+		return false
+	}
+	if a.collectPaths {
+		a.cur.current.Pop()
+	}
+	if a.post != nil {
+		a.cur.replacer = replacer
+		a.cur.parent = parent
+		a.cur.node = node
+		if !a.post(&a.cur) {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *application) rewriteVisitable(parent AST, node Visitable, replacer replacerFunc) bool {
+	if a.pre != nil {
+		a.cur.replacer = replacer
+		a.cur.parent = parent
+		a.cur.node = node
+		kontinue := !a.pre(&a.cur)
+		if a.cur.revisit {
+			a.cur.revisit = false
+			return a.rewriteAST(parent, a.cur.node, replacer)
+		}
+		if kontinue {
+			return true
+		}
+	}
+	if a.collectPaths {
+		a.cur.current.AddStep(uint16(VisitableInner))
+	}
+	if !a.rewriteAST(node, node.VisitThis(), func(newNode, parent AST) {
+		panic("[BUG] tried to replace 'VisitThis' on 'Visitable'")
 	}) {
 		return false
 	}

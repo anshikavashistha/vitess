@@ -19,7 +19,6 @@ package engine
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 
 	"vitess.io/vitess/go/vt/sqlparser"
@@ -243,7 +242,8 @@ func TestSetTable(t *testing.T) {
 		expectedQueryLog: []string{
 			`ResolveDestinations ks [] Destinations:DestinationAnyShard()`,
 			`Needs Reserved Conn`,
-			`ExecuteMultiShard ks.-20: set @@x = dummy_expr {} false false`,
+			`SysVar set with (x,dummy_expr)`,
+			`ExecuteMultiShard ks.-20: set x = dummy_expr {} false false`,
 		},
 	}, {
 		testName: "sysvar set not modifying setting",
@@ -452,7 +452,7 @@ func TestSetTable(t *testing.T) {
 			`ResolveDestinations ks [] Destinations:DestinationKeyspaceID(00)`,
 			`ExecuteMultiShard ks.-20: select @@sql_mode orig, '' new {} false false`,
 			"SysVar set with (sql_mode,'')",
-			"Needs Reserved Conn",
+			"SET_VAR can be used",
 		},
 		qr: []*sqltypes.Result{sqltypes.MakeTestResult(sqltypes.MakeTestFields("orig|new", "varchar|varchar"),
 			"a|",
@@ -478,7 +478,7 @@ func TestSetTable(t *testing.T) {
 			"|a",
 		)},
 	}, {
-		testName:     "sql_mode change to empty - non empty orig - MySQL80 - should use reserved conn",
+		testName:     "sql_mode change to empty - non empty orig - MySQL80 - set_var allowed",
 		mysqlVersion: "8.0.0",
 		setOps: []SetOp{
 			&SysVarReservedConn{
@@ -492,7 +492,7 @@ func TestSetTable(t *testing.T) {
 			`ResolveDestinations ks [] Destinations:DestinationKeyspaceID(00)`,
 			`ExecuteMultiShard ks.-20: select @@sql_mode orig, '' new {} false false`,
 			"SysVar set with (sql_mode,'')",
-			"Needs Reserved Conn",
+			"SET_VAR can be used",
 		},
 		qr: []*sqltypes.Result{sqltypes.MakeTestResult(sqltypes.MakeTestFields("orig|new", "varchar|varchar"),
 			"a|",
@@ -609,7 +609,8 @@ func TestSysVarSetErr(t *testing.T) {
 	expectedQueryLog := []string{
 		`ResolveDestinations ks [] Destinations:DestinationAnyShard()`,
 		"Needs Reserved Conn",
-		`ExecuteMultiShard ks.-20: set @@x = dummy_expr {} false false`,
+		"SysVar set with (x,dummy_expr)",
+		`ExecuteMultiShard ks.-20: set x = dummy_expr {} false false`,
 	}
 
 	set := &Set{
@@ -618,7 +619,7 @@ func TestSysVarSetErr(t *testing.T) {
 	}
 	vc := &loggingVCursor{
 		shards:         []string{"-20", "20-"},
-		multiShardErrs: []error{fmt.Errorf("error")},
+		multiShardErrs: []error{errors.New("error")},
 	}
 	_, err := set.TryExecute(context.Background(), vc, map[string]*querypb.BindVariable{}, false)
 	require.EqualError(t, err, "error")

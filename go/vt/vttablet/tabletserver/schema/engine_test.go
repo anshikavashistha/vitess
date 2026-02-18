@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,12 +38,10 @@ import (
 	"vitess.io/vitess/go/mysql"
 	"vitess.io/vitess/go/mysql/fakesqldb"
 	"vitess.io/vitess/go/mysql/replication"
-	"vitess.io/vitess/go/mysql/sqlerror"
 	"vitess.io/vitess/go/sqltypes"
 	"vitess.io/vitess/go/stats"
 	"vitess.io/vitess/go/test/utils"
 	"vitess.io/vitess/go/vt/dbconfigs"
-	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
 	"vitess.io/vitess/go/vt/sqlparser"
 	"vitess.io/vitess/go/vt/vtenv"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/connpool"
@@ -51,10 +50,13 @@ import (
 
 	binlogdatapb "vitess.io/vitess/go/vt/proto/binlogdata"
 	querypb "vitess.io/vitess/go/vt/proto/query"
+	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
 )
 
-const baseShowTablesWithSizesPattern = `SELECT t\.table_name.*SUM\(i\.file_size\).*`
-const baseInnoDBTableSizesPattern = `(?s).*SELECT.*its\.space = it\.space.*SUM\(its\.file_size\).*`
+const (
+	baseShowTablesWithSizesPattern = `SELECT t\.table_name.*SUM\(i\.file_size\).*`
+	baseInnoDBTableSizesPattern    = `(?s).*SELECT.*its\.space = it\.space.*SUM\(its\.file_size\).*`
+)
 
 var mustMatch = utils.MustMatchFn(".Mutex")
 
@@ -124,8 +126,8 @@ func TestOpenAndReloadLegacy(t *testing.T) {
 	// Modify test_table_03
 	// Add test_table_04
 	// Drop msg
-	db.AddQueryPattern(baseShowTablesWithSizesPattern, &sqltypes.Result{
-		Fields: mysql.BaseShowTablesWithSizesFields,
+	db.AddQuery(mysql.BaseShowTables, &sqltypes.Result{
+		Fields: mysql.BaseShowTablesFields,
 		Rows: [][]sqltypes.Value{
 			mysql.BaseShowTablesWithSizesRow("test_table_01", false, ""),
 			mysql.BaseShowTablesWithSizesRow("test_table_02", false, ""),
@@ -134,16 +136,14 @@ func TestOpenAndReloadLegacy(t *testing.T) {
 				sqltypes.MakeTrusted(sqltypes.VarChar, []byte("BASE TABLE")),    // table_type
 				sqltypes.MakeTrusted(sqltypes.Int64, []byte("1427325877")),      // unix_timestamp(t.create_time)
 				sqltypes.MakeTrusted(sqltypes.VarChar, []byte("")),              // table_comment
-				sqltypes.MakeTrusted(sqltypes.Int64, []byte("128")),             // file_size
-				sqltypes.MakeTrusted(sqltypes.Int64, []byte("256")),             // allocated_size
 			},
 			// test_table_04 will in spite of older timestamp because it doesn't exist yet.
-			mysql.BaseShowTablesWithSizesRow("test_table_04", false, ""),
-			mysql.BaseShowTablesWithSizesRow("seq", false, "vitess_sequence"),
+			mysql.BaseShowTablesRow("test_table_04", false, ""),
+			mysql.BaseShowTablesRow("seq", false, "vitess_sequence"),
 		},
 	})
 
-	db.AddRejectedQuery(mysql.BaseShowTables, fmt.Errorf("Reloading schema engine should query tables with size information"))
+	db.AddRejectedQuery(mysql.TablesWithSize57, errors.New("Reloading schema engine should query tables with size information"))
 
 	db.MockQueriesForTable("test_table_03", &sqltypes.Result{
 		Fields: []*querypb.Field{{
@@ -200,15 +200,6 @@ func TestOpenAndReloadLegacy(t *testing.T) {
 
 	assert.EqualValues(t, secondReadRowsValue, se.innoDbReadRowsCounter.Get())
 
-	want["seq"].FileSize = 100
-	want["seq"].AllocatedSize = 150
-
-	want["test_table_01"].FileSize = 100
-	want["test_table_01"].AllocatedSize = 150
-
-	want["test_table_02"].FileSize = 100
-	want["test_table_02"].AllocatedSize = 150
-
 	want["test_table_03"] = &Table{
 		Name: sqlparser.NewIdentifierCS("test_table_03"),
 		Fields: []*querypb.Field{{
@@ -221,10 +212,8 @@ func TestOpenAndReloadLegacy(t *testing.T) {
 			Name: "val",
 			Type: sqltypes.Int32,
 		}},
-		PKColumns:     []int{0, 1},
-		CreateTime:    1427325877,
-		FileSize:      128,
-		AllocatedSize: 256,
+		PKColumns:  []int{0, 1},
+		CreateTime: 1427325877,
 	}
 	want["test_table_04"] = &Table{
 		Name: sqlparser.NewIdentifierCS("test_table_04"),
@@ -232,10 +221,8 @@ func TestOpenAndReloadLegacy(t *testing.T) {
 			Name: "pk",
 			Type: sqltypes.Int32,
 		}},
-		PKColumns:     []int{0},
-		CreateTime:    1427325875,
-		FileSize:      100,
-		AllocatedSize: 150,
+		PKColumns:  []int{0},
+		CreateTime: 1427325875,
 	}
 	delete(want, "msg")
 	assert.Equal(t, want, se.GetSchema())
@@ -372,8 +359,6 @@ func TestOpenAndReload(t *testing.T) {
 				sqltypes.MakeTrusted(sqltypes.VarChar, []byte("BASE TABLE")),    // table_type
 				sqltypes.MakeTrusted(sqltypes.Int64, []byte("1427325877")),      // unix_timestamp(t.create_time)
 				sqltypes.MakeTrusted(sqltypes.VarChar, []byte("")),              // table_comment
-				sqltypes.MakeTrusted(sqltypes.Int64, []byte("128")),             // file_size
-				sqltypes.MakeTrusted(sqltypes.Int64, []byte("256")),             // allocated_size
 			},
 			mysql.BaseShowTablesRow("test_table_04", false, ""),
 			mysql.BaseShowTablesRow("seq", false, "vitess_sequence"),
@@ -391,8 +376,6 @@ func TestOpenAndReload(t *testing.T) {
 			mysql.BaseInnoDBTableSizesRow("fakesqldb", "test_table_02"),
 			{
 				sqltypes.MakeTrusted(sqltypes.VarChar, []byte("fakesqldb/test_table_03")), // table_name
-				sqltypes.MakeTrusted(sqltypes.Int64, []byte("128")),                       // file_size
-				sqltypes.MakeTrusted(sqltypes.Int64, []byte("256")),                       // allocated_size
 			},
 			mysql.BaseInnoDBTableSizesRow("fakesqldb", "test_table_04"),
 			mysql.BaseInnoDBTableSizesRow("fakesqldb", "seq"),
@@ -455,15 +438,6 @@ func TestOpenAndReload(t *testing.T) {
 
 	assert.EqualValues(t, secondReadRowsValue, se.innoDbReadRowsCounter.Get())
 
-	want["seq"].FileSize = 100
-	want["seq"].AllocatedSize = 150
-
-	want["test_table_01"].FileSize = 100
-	want["test_table_01"].AllocatedSize = 150
-
-	want["test_table_02"].FileSize = 100
-	want["test_table_02"].AllocatedSize = 150
-
 	want["test_table_03"] = &Table{
 		Name: sqlparser.NewIdentifierCS("test_table_03"),
 		Fields: []*querypb.Field{{
@@ -476,10 +450,8 @@ func TestOpenAndReload(t *testing.T) {
 			Name: "val",
 			Type: sqltypes.Int32,
 		}},
-		PKColumns:     []int{0, 1},
-		CreateTime:    1427325877,
-		FileSize:      128,
-		AllocatedSize: 256,
+		PKColumns:  []int{0, 1},
+		CreateTime: 1427325877,
 	}
 	want["test_table_04"] = &Table{
 		Name: sqlparser.NewIdentifierCS("test_table_04"),
@@ -487,10 +459,8 @@ func TestOpenAndReload(t *testing.T) {
 			Name: "pk",
 			Type: sqltypes.Int32,
 		}},
-		PKColumns:     []int{0},
-		CreateTime:    1427325875,
-		FileSize:      100,
-		AllocatedSize: 150,
+		PKColumns:  []int{0},
+		CreateTime: 1427325875,
 	}
 	delete(want, "msg")
 	assert.Equal(t, want, se.GetSchema())
@@ -646,31 +616,14 @@ func TestReloadWithSwappedTables(t *testing.T) {
 	err := se.Reload(context.Background())
 	require.NoError(t, err)
 
-	want["msg"].FileSize = 100
-	want["msg"].AllocatedSize = 150
-
-	want["seq"].FileSize = 100
-	want["seq"].AllocatedSize = 150
-
-	want["test_table_01"].FileSize = 100
-	want["test_table_01"].AllocatedSize = 150
-
-	want["test_table_02"].FileSize = 100
-	want["test_table_02"].AllocatedSize = 150
-
-	want["test_table_03"].FileSize = 100
-	want["test_table_03"].AllocatedSize = 150
-
 	want["test_table_04"] = &Table{
 		Name: sqlparser.NewIdentifierCS("test_table_04"),
 		Fields: []*querypb.Field{{
 			Name: "mypk",
 			Type: sqltypes.Int32,
 		}},
-		PKColumns:     []int{0},
-		CreateTime:    1427325877,
-		FileSize:      128,
-		AllocatedSize: 256,
+		PKColumns:  []int{0},
+		CreateTime: 1427325877,
 	}
 
 	mustMatch(t, want, se.GetSchema())
@@ -689,8 +642,6 @@ func TestReloadWithSwappedTables(t *testing.T) {
 			mysql.BaseInnoDBTableSizesRow("fakesqldb", "test_table_02"),
 			{
 				sqltypes.MakeTrusted(sqltypes.VarChar, []byte("fakesqldb/test_table_03")), // table_name
-				sqltypes.MakeTrusted(sqltypes.Int64, []byte("128")),                       // file_size
-				sqltypes.MakeTrusted(sqltypes.Int64, []byte("256")),                       // allocated_size
 			},
 			mysql.BaseInnoDBTableSizesRow("fakesqldb", "test_table_04"),
 			mysql.BaseInnoDBTableSizesRow("fakesqldb", "seq"),
@@ -709,8 +660,6 @@ func TestReloadWithSwappedTables(t *testing.T) {
 				sqltypes.MakeTrusted(sqltypes.VarChar, []byte("BASE TABLE")),
 				sqltypes.MakeTrusted(sqltypes.Int64, []byte("1427325877")), // unix_timestamp(create_time)
 				sqltypes.MakeTrusted(sqltypes.VarChar, []byte("")),
-				sqltypes.MakeTrusted(sqltypes.Int64, []byte("128")), // file_size
-				sqltypes.MakeTrusted(sqltypes.Int64, []byte("256")), // allocated_size
 			},
 			mysql.BaseShowTablesRow("test_table_04", false, ""),
 			mysql.BaseShowTablesRow("seq", false, "vitess_sequence"),
@@ -755,10 +704,8 @@ func TestReloadWithSwappedTables(t *testing.T) {
 			Name: "mypk",
 			Type: sqltypes.Int32,
 		}},
-		PKColumns:     []int{0},
-		CreateTime:    1427325877,
-		FileSize:      128,
-		AllocatedSize: 256,
+		PKColumns:  []int{0},
+		CreateTime: 1427325877,
 	}
 	want["test_table_04"] = &Table{
 		Name: sqlparser.NewIdentifierCS("test_table_04"),
@@ -766,10 +713,8 @@ func TestReloadWithSwappedTables(t *testing.T) {
 			Name: "pk",
 			Type: sqltypes.Int32,
 		}},
-		PKColumns:     []int{0},
-		CreateTime:    1427325875,
-		FileSize:      100,
-		AllocatedSize: 150,
+		PKColumns:  []int{0},
+		CreateTime: 1427325875,
 	}
 	mustMatch(t, want, se.GetSchema())
 }
@@ -787,7 +732,8 @@ func TestOpenFailedDueToExecErr(t *testing.T) {
 	}
 }
 
-// TestOpenFailedDueToLoadTableErr tests that schema engine load should not fail instead should log the failures.
+// TestOpenFailedDueToLoadTableErr tests that schema engine load should fail for test_table and
+// No field query is expected to be executed for view i.e. test_view.
 func TestOpenFailedDueToLoadTableErr(t *testing.T) {
 	tl := syslogger.NewTestLogger()
 	defer tl.Close()
@@ -804,58 +750,11 @@ func TestOpenFailedDueToLoadTableErr(t *testing.T) {
 	// this will cause NewTable error, as it expects zero rows.
 	db.MockQueriesForTable("test_table", sqltypes.MakeTestResult(sqltypes.MakeTestFields("foo", "varchar"), ""))
 
-	// adding column query for table_view
-	db.AddQueryPattern(fmt.Sprintf(mysql.GetColumnNamesQueryPatternForTable, "test_view"),
-		sqltypes.MakeTestResult(sqltypes.MakeTestFields("column_name", "varchar"), ""))
-	// rejecting the impossible query
-	db.AddRejectedQuery("SELECT * FROM `fakesqldb`.`test_view` WHERE 1 != 1", sqlerror.NewSQLErrorFromError(errors.New("The user specified as a definer ('root'@'%') does not exist (errno 1449) (sqlstate HY000)")))
-
 	AddFakeInnoDBReadRowsResult(db, 0)
 	se := newEngine(1*time.Second, 1*time.Second, 0, db, nil)
 	err := se.Open()
 	// failed load should return an error because of test_table
 	assert.ErrorContains(t, err, "Row count exceeded")
-
-	logs := tl.GetAllLogs()
-	logOutput := strings.Join(logs, ":::")
-	assert.Contains(t, logOutput, "WARNING:Failed reading schema for the view: test_view")
-	assert.Contains(t, logOutput, "The user specified as a definer ('root'@'%') does not exist (errno 1449) (sqlstate HY000)")
-}
-
-// TestOpenNoErrorDueToInvalidViews tests that schema engine load does not fail instead should log the failures for the views
-func TestOpenNoErrorDueToInvalidViews(t *testing.T) {
-	tl := syslogger.NewTestLogger()
-	defer tl.Close()
-	db := fakesqldb.New(t)
-	defer db.Close()
-	schematest.AddDefaultQueries(db)
-	db.AddQuery(mysql.BaseShowTables, &sqltypes.Result{
-		Fields: mysql.BaseShowTablesFields,
-		Rows: [][]sqltypes.Value{
-			mysql.BaseShowTablesWithSizesRow("foo_view", true, "VIEW"),
-			mysql.BaseShowTablesWithSizesRow("bar_view", true, "VIEW"),
-		},
-	})
-
-	// adding column query for table_view
-	db.AddQueryPattern(fmt.Sprintf(mysql.GetColumnNamesQueryPatternForTable, "foo_view"),
-		&sqltypes.Result{})
-	db.AddQueryPattern(fmt.Sprintf(mysql.GetColumnNamesQueryPatternForTable, "bar_view"),
-		sqltypes.MakeTestResult(sqltypes.MakeTestFields("column_name", "varchar"), "col1", "col2"))
-	// rejecting the impossible query
-	db.AddRejectedQuery("SELECT `col1`, `col2` FROM `fakesqldb`.`bar_view` WHERE 1 != 1", sqlerror.NewSQLError(sqlerror.ERWrongFieldWithGroup, sqlerror.SSClientError, "random error for table bar_view"))
-
-	AddFakeInnoDBReadRowsResult(db, 0)
-	se := newEngine(1*time.Second, 1*time.Second, 0, db, nil)
-	err := se.Open()
-	require.NoError(t, err)
-
-	logs := tl.GetAllLogs()
-	logOutput := strings.Join(logs, ":::")
-	assert.Contains(t, logOutput, "WARNING:Failed reading schema for the view: foo_view")
-	assert.Contains(t, logOutput, "unable to get columns for table fakesqldb.foo_view")
-	assert.Contains(t, logOutput, "WARNING:Failed reading schema for the view: bar_view")
-	assert.Contains(t, logOutput, "random error for table bar_view")
 }
 
 func TestExportVars(t *testing.T) {
@@ -1606,7 +1505,7 @@ func TestEngineReload(t *testing.T) {
 			// Queries for reloading the tables' information.
 			{
 				for _, tableName := range []string{"t2", "T2"} {
-					db.AddQuery(fmt.Sprintf(`show create table %s`, tableName),
+					db.AddQuery("show create table "+tableName,
 						sqltypes.MakeTestResult(sqltypes.MakeTestFields("Table | Create Table", "varchar|varchar"),
 							fmt.Sprintf("%v|create_table_%v", tableName, tableName)))
 				}
@@ -1614,36 +1513,36 @@ func TestEngineReload(t *testing.T) {
 				db.AddQuery("commit", &sqltypes.Result{})
 				db.AddQuery("rollback", &sqltypes.Result{})
 				// We are adding both the variants of the delete statements that we can see in the test, since the deleted tables are initially stored as a map, the order is not defined.
-				db.AddQuery("delete from _vt.`tables` where TABLE_SCHEMA = database() and TABLE_NAME in ('t5', 't4', 'T2', 't2')", &sqltypes.Result{})
-				db.AddQuery("delete from _vt.`tables` where TABLE_SCHEMA = database() and TABLE_NAME in ('t4', 't5', 'T2', 't2')", &sqltypes.Result{})
-				db.AddQuery("insert into _vt.`tables`(TABLE_SCHEMA, TABLE_NAME, CREATE_STATEMENT, CREATE_TIME) values (database(), 't2', 'create_table_t2', 123456790)", &sqltypes.Result{})
-				db.AddQuery("insert into _vt.`tables`(TABLE_SCHEMA, TABLE_NAME, CREATE_STATEMENT, CREATE_TIME) values (database(), 'T2', 'create_table_T2', 123456789)", &sqltypes.Result{})
+				db.AddQuery("delete from _vt.`tables` where TABLE_SCHEMA = database() and `TABLE_NAME` in ('t5', 't4', 'T2', 't2')", &sqltypes.Result{})
+				db.AddQuery("delete from _vt.`tables` where TABLE_SCHEMA = database() and `TABLE_NAME` in ('t4', 't5', 'T2', 't2')", &sqltypes.Result{})
+				db.AddQuery("insert into _vt.`tables`(TABLE_SCHEMA, `TABLE_NAME`, CREATE_STATEMENT, CREATE_TIME) values (database(), 't2', 'create_table_t2', 123456790)", &sqltypes.Result{})
+				db.AddQuery("insert into _vt.`tables`(TABLE_SCHEMA, `TABLE_NAME`, CREATE_STATEMENT, CREATE_TIME) values (database(), 'T2', 'create_table_T2', 123456789)", &sqltypes.Result{})
 			}
 
 			// Queries for reloading the views' information.
 			{
 				for _, tableName := range []string{"v2", "V2"} {
-					db.AddQuery(fmt.Sprintf(`show create table %s`, tableName),
+					db.AddQuery("show create table "+tableName,
 						sqltypes.MakeTestResult(sqltypes.MakeTestFields(" View | Create View | character_set_client | collation_connection", "varchar|varchar|varchar|varchar"),
 							fmt.Sprintf("%v|create_table_%v|utf8mb4|utf8mb4_0900_ai_ci", tableName, tableName)))
 				}
 				// We are adding both the variants of the select statements that we can see in the test, since the deleted views are initially stored as a map, the order is not defined.
-				db.AddQuery("select table_name, view_definition from information_schema.views where table_schema = database() and table_name in ('v4', 'v5', 'V2', 'v2')",
+				db.AddQuery("select `table_name`, view_definition from information_schema.views where table_schema = database() and `table_name` in ('v4', 'v5', 'V2', 'v2')",
 					sqltypes.MakeTestResult(sqltypes.MakeTestFields("table_name|view_definition", "varchar|varchar"),
 						"v2|select_v2",
 						"V2|select_V2",
 					))
-				db.AddQuery("select table_name, view_definition from information_schema.views where table_schema = database() and table_name in ('v5', 'v4', 'V2', 'v2')",
+				db.AddQuery("select `table_name`, view_definition from information_schema.views where table_schema = database() and `table_name` in ('v5', 'v4', 'V2', 'v2')",
 					sqltypes.MakeTestResult(sqltypes.MakeTestFields("table_name|view_definition", "varchar|varchar"),
 						"v2|select_v2",
 						"V2|select_V2",
 					))
 
 				// We are adding both the variants of the delete statements that we can see in the test, since the deleted views are initially stored as a map, the order is not defined.
-				db.AddQuery("delete from _vt.views where TABLE_SCHEMA = database() and TABLE_NAME in ('v4', 'v5', 'V2', 'v2')", &sqltypes.Result{})
-				db.AddQuery("delete from _vt.views where TABLE_SCHEMA = database() and TABLE_NAME in ('v5', 'v4', 'V2', 'v2')", &sqltypes.Result{})
-				db.AddQuery("insert into _vt.views(TABLE_SCHEMA, TABLE_NAME, CREATE_STATEMENT, VIEW_DEFINITION) values (database(), 'v2', 'create_table_v2', 'select_v2')", &sqltypes.Result{})
-				db.AddQuery("insert into _vt.views(TABLE_SCHEMA, TABLE_NAME, CREATE_STATEMENT, VIEW_DEFINITION) values (database(), 'V2', 'create_table_V2', 'select_V2')", &sqltypes.Result{})
+				db.AddQuery("delete from _vt.views where TABLE_SCHEMA = database() and `TABLE_NAME` in ('v4', 'v5', 'V2', 'v2')", &sqltypes.Result{})
+				db.AddQuery("delete from _vt.views where TABLE_SCHEMA = database() and `TABLE_NAME` in ('v5', 'v4', 'V2', 'v2')", &sqltypes.Result{})
+				db.AddQuery("insert into _vt.views(TABLE_SCHEMA, `TABLE_NAME`, CREATE_STATEMENT, VIEW_DEFINITION) values (database(), 'v2', 'create_table_v2', 'select_v2')", &sqltypes.Result{})
+				db.AddQuery("insert into _vt.views(TABLE_SCHEMA, `TABLE_NAME`, CREATE_STATEMENT, VIEW_DEFINITION) values (database(), 'V2', 'create_table_V2', 'select_V2')", &sqltypes.Result{})
 			}
 
 			// adding query pattern for udfs
@@ -1679,12 +1578,11 @@ func TestEngineReload(t *testing.T) {
 // that it conforms to the intended/expected behavior in various scenarios.
 // This more specifically tests the behavior of the function when the historian is
 // disabled or otherwise unable to get a table schema for the given position. When it
-// CAN, that is tested indepenently in the historian tests.
+// CAN, that is tested independently in the historian tests.
 //
 // Runs with 5.7 env
 func TestGetTableForPosLegacy(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	fakedb := fakesqldb.NewWithEnv(t, vtenv.NewLegacyTestEnv())
 	cfg := tabletenv.NewDefaultConfig()
 	cfg.DB = newDBConfigs(fakedb)
@@ -1714,25 +1612,23 @@ func TestGetTableForPosLegacy(t *testing.T) {
 		db.AddQuery("SELECT UNIX_TIMESTAMP()", sqltypes.MakeTestResult(sqltypes.MakeTestFields(
 			"UNIX_TIMESTAMP()",
 			"int64"),
-			fmt.Sprintf("%d", time.Now().Unix()),
+			strconv.FormatInt(time.Now().Unix(), 10),
 		))
 		db.AddQuery(fmt.Sprintf(detectViewChange, sidecar.GetIdentifier()), sqltypes.MakeTestResult(sqltypes.MakeTestFields("table_name", "varchar")))
 		db.AddQuery(fmt.Sprintf(readTableCreateTimes, sidecar.GetIdentifier()),
 			sqltypes.MakeTestResult(sqltypes.MakeTestFields("table_name|create_time", "varchar|int64")))
 		db.AddQuery(fmt.Sprintf(detectUdfChange, sidecar.GetIdentifier()), &sqltypes.Result{})
-		db.AddQueryPattern(baseShowTablesWithSizesPattern,
+		db.AddQuery(mysql.BaseShowTables,
 			&sqltypes.Result{
-				Fields:       mysql.BaseShowTablesWithSizesFields,
+				Fields:       mysql.BaseShowTablesFields,
 				RowsAffected: 0,
 				InsertID:     0,
 				Rows: [][]sqltypes.Value{
 					{
-						sqltypes.MakeTrusted(sqltypes.VarChar, []byte(table.String())),                          // table_name
-						sqltypes.MakeTrusted(sqltypes.VarChar, []byte("BASE TABLE")),                            // table_type
-						sqltypes.MakeTrusted(sqltypes.Int64, []byte(fmt.Sprintf("%d", time.Now().Unix()-1000))), // unix_timestamp(t.create_time)
-						sqltypes.MakeTrusted(sqltypes.VarChar, []byte("")),                                      // table_comment
-						sqltypes.MakeTrusted(sqltypes.Int64, []byte("128")),                                     // file_size
-						sqltypes.MakeTrusted(sqltypes.Int64, []byte("256")),                                     // allocated_size
+						sqltypes.MakeTrusted(sqltypes.VarChar, []byte(table.String())),                              // table_name
+						sqltypes.MakeTrusted(sqltypes.VarChar, []byte("BASE TABLE")),                                // table_type
+						sqltypes.MakeTrusted(sqltypes.Int64, []byte(strconv.FormatInt(time.Now().Unix()-1000, 10))), // unix_timestamp(t.create_time)
+						sqltypes.MakeTrusted(sqltypes.VarChar, []byte("")),                                          // table_comment
 					},
 				},
 				SessionStateChanges: "",
@@ -1749,7 +1645,7 @@ func TestGetTableForPosLegacy(t *testing.T) {
 			sqltypes.MakeTestResult(sqltypes.MakeTestFields("column_name", "varchar"), column))
 		db.AddQuery(fmt.Sprintf("SELECT `%s` FROM `fakesqldb`.`%v` WHERE 1 != 1", column, table.String()),
 			sqltypes.MakeTestResult(sqltypes.MakeTestFields(column, "varchar")))
-		db.AddQuery(fmt.Sprintf(`show create table %s`, table.String()),
+		db.AddQuery("show create table "+table.String(),
 			sqltypes.MakeTestResult(sqltypes.MakeTestFields("Table|Create Table", "varchar|varchar"), table.String(), tableSchema))
 		db.AddQuery("begin", &sqltypes.Result{})
 		db.AddQuery(fmt.Sprintf("delete from %s.`tables` where TABLE_SCHEMA = database() and TABLE_NAME in ('%s')",
@@ -1822,7 +1718,7 @@ func TestGetTableForPosLegacy(t *testing.T) {
 					sqltypes.MakeTestResult(sqltypes.MakeTestFields("column_name", "varchar"), column, "col2"))
 				db.AddQuery(fmt.Sprintf("SELECT `%s`, `%s` FROM `fakesqldb`.`%v` WHERE 1 != 1",
 					column, "col2", table.String()), sqltypes.MakeTestResult(sqltypes.MakeTestFields(fmt.Sprintf("%s|%s", column, "col2"), "varchar|varchar")))
-				db.AddQuery(fmt.Sprintf(`show create table %s`, table.String()),
+				db.AddQuery("show create table "+table.String(),
 					sqltypes.MakeTestResult(sqltypes.MakeTestFields("Table|Create Table", "varchar|varchar"), table.String(), newTableSchema))
 				db.AddQuery("begin", &sqltypes.Result{})
 				db.AddQuery(fmt.Sprintf("delete from %s.`tables` where TABLE_SCHEMA = database() and TABLE_NAME in ('%s')",
@@ -1872,8 +1768,7 @@ func TestGetTableForPosLegacy(t *testing.T) {
 // disabled or otherwise unable to get a table schema for the given position. When it
 // CAN, that is tested indepenently in the historian tests.
 func TestGetTableForPos(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	fakedb := fakesqldb.New(t)
 	cfg := tabletenv.NewDefaultConfig()
 	cfg.DB = newDBConfigs(fakedb)
@@ -1900,10 +1795,14 @@ func TestGetTableForPos(t *testing.T) {
 	se.historian.enabled = false
 
 	addExpectedReloadQueries := func(db *fakesqldb.DB) {
+		db.AddQuery(mysql.ShowPartitons, &sqltypes.Result{})
+		db.AddQuery(mysql.ShowTableRowCountClusteredIndex, &sqltypes.Result{})
+		db.AddQuery(mysql.ShowIndexSizes, &sqltypes.Result{})
+		db.AddQuery(mysql.ShowIndexCardinalities, &sqltypes.Result{})
 		db.AddQuery("SELECT UNIX_TIMESTAMP()", sqltypes.MakeTestResult(sqltypes.MakeTestFields(
 			"UNIX_TIMESTAMP()",
 			"int64"),
-			fmt.Sprintf("%d", time.Now().Unix()),
+			strconv.FormatInt(time.Now().Unix(), 10),
 		))
 		db.AddQuery(fmt.Sprintf(detectViewChange, sidecar.GetIdentifier()), sqltypes.MakeTestResult(sqltypes.MakeTestFields("table_name", "varchar")))
 		db.AddQuery(fmt.Sprintf(readTableCreateTimes, sidecar.GetIdentifier()),
@@ -1923,10 +1822,10 @@ func TestGetTableForPos(t *testing.T) {
 			Fields: mysql.BaseShowTablesFields,
 			Rows: [][]sqltypes.Value{
 				{
-					sqltypes.MakeTrusted(sqltypes.VarChar, []byte(table.String())),                          // table_name
-					sqltypes.MakeTrusted(sqltypes.VarChar, []byte("BASE TABLE")),                            // table_type
-					sqltypes.MakeTrusted(sqltypes.Int64, []byte(fmt.Sprintf("%d", time.Now().Unix()-1000))), // unix_timestamp(t.create_time)
-					sqltypes.MakeTrusted(sqltypes.VarChar, []byte("")),                                      // table_comment
+					sqltypes.MakeTrusted(sqltypes.VarChar, []byte(table.String())),                              // table_name
+					sqltypes.MakeTrusted(sqltypes.VarChar, []byte("BASE TABLE")),                                // table_type
+					sqltypes.MakeTrusted(sqltypes.Int64, []byte(strconv.FormatInt(time.Now().Unix()-1000, 10))), // unix_timestamp(t.create_time)
+					sqltypes.MakeTrusted(sqltypes.VarChar, []byte("")),                                          // table_comment
 				},
 			},
 			SessionStateChanges: "",
@@ -1943,7 +1842,7 @@ func TestGetTableForPos(t *testing.T) {
 			sqltypes.MakeTestResult(sqltypes.MakeTestFields("column_name", "varchar"), column))
 		db.AddQuery(fmt.Sprintf("SELECT `%s` FROM `fakesqldb`.`%v` WHERE 1 != 1", column, table.String()),
 			sqltypes.MakeTestResult(sqltypes.MakeTestFields(column, "varchar")))
-		db.AddQuery(fmt.Sprintf(`show create table %s`, table.String()),
+		db.AddQuery("show create table "+table.String(),
 			sqltypes.MakeTestResult(sqltypes.MakeTestFields("Table|Create Table", "varchar|varchar"), table.String(), tableSchema))
 		db.AddQuery("begin", &sqltypes.Result{})
 		db.AddQuery(fmt.Sprintf("delete from %s.`tables` where TABLE_SCHEMA = database() and TABLE_NAME in ('%s')",
@@ -2016,7 +1915,7 @@ func TestGetTableForPos(t *testing.T) {
 					sqltypes.MakeTestResult(sqltypes.MakeTestFields("column_name", "varchar"), column, "col2"))
 				db.AddQuery(fmt.Sprintf("SELECT `%s`, `%s` FROM `fakesqldb`.`%v` WHERE 1 != 1",
 					column, "col2", table.String()), sqltypes.MakeTestResult(sqltypes.MakeTestFields(fmt.Sprintf("%s|%s", column, "col2"), "varchar|varchar")))
-				db.AddQuery(fmt.Sprintf(`show create table %s`, table.String()),
+				db.AddQuery("show create table "+table.String(),
 					sqltypes.MakeTestResult(sqltypes.MakeTestFields("Table|Create Table", "varchar|varchar"), table.String(), newTableSchema))
 				db.AddQuery("begin", &sqltypes.Result{})
 				db.AddQuery(fmt.Sprintf("delete from %s.`tables` where TABLE_SCHEMA = database() and TABLE_NAME in ('%s')",

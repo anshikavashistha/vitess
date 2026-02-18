@@ -39,6 +39,7 @@ import (
 	"vitess.io/vitess/go/vt/servenv"
 	"vitess.io/vitess/go/vt/topo"
 	"vitess.io/vitess/go/vt/topo/topoproto"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vtctl"
 	"vitess.io/vitess/go/vt/vttablet/tmclient"
 	"vitess.io/vitess/go/vt/wrangler"
@@ -84,7 +85,7 @@ func init() {
 
 func registerVtctldAPIFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&localCell, "cell", localCell, "cell to use")
-	fs.BoolVar(&proxyTablets, "proxy_tablets", proxyTablets, "Setting this true will make vtctld proxy the tablet status instead of redirecting to them")
+	utils.SetFlagBoolVar(fs, &proxyTablets, "proxy-tablets", proxyTablets, "Setting this true will make vtctld proxy the tablet status instead of redirecting to them")
 }
 
 func newTabletWithURL(t *topodatapb.Tablet) *TabletWithURL {
@@ -114,7 +115,7 @@ func newTabletWithURL(t *topodatapb.Tablet) *TabletWithURL {
 
 func httpErrorf(w http.ResponseWriter, r *http.Request, format string, args ...any) {
 	errMsg := fmt.Sprintf(format, args...)
-	log.Errorf("HTTP error on %v: %v, request: %#v", r.URL.Path, errMsg, r)
+	log.Error(fmt.Sprintf("HTTP error on %v: %v, request: %#v", r.URL.Path, errMsg, r))
 	http.Error(w, errMsg, http.StatusInternalServerError)
 }
 
@@ -341,7 +342,7 @@ func initAPI(ctx context.Context, ts *topo.Server, actions *ActionRepository) {
 					return nil, fmt.Errorf("could not fetch cell info: %v", err)
 				}
 				if len(cells) == 0 {
-					return nil, fmt.Errorf("no local cells have been created yet")
+					return nil, errors.New("no local cells have been created yet")
 				}
 				cell = cells[0]
 			} else {
@@ -377,7 +378,6 @@ func initAPI(ctx context.Context, ts *topo.Server, actions *ActionRepository) {
 			srvKeyspaces[keyspaceName] = srvKeyspace
 		}
 		return srvKeyspaces, nil
-
 	})
 
 	// Tablets
@@ -530,7 +530,7 @@ func initAPI(ctx context.Context, ts *topo.Server, actions *ActionRepository) {
 			return err
 		}
 
-		requestContext := fmt.Sprintf("vtctld/api:%s", apiCallUUID)
+		requestContext := "vtctld/api:" + apiCallUUID
 		executor := schemamanager.NewTabletExecutor(requestContext, wr.TopoServer(), wr.TabletManagerClient(), wr.Logger(), time.Duration(req.ReplicaTimeoutSeconds)*time.Second, 0, actions.env.Parser())
 		if err := executor.SetDDLStrategy(req.DDLStrategy); err != nil {
 			return fmt.Errorf("error setting DDL strategy: %v", err)

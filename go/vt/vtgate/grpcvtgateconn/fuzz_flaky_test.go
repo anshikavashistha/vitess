@@ -1,5 +1,4 @@
 //go:build gofuzz
-// +build gofuzz
 
 /*
 Copyright 2021 The Vitess Authors.
@@ -96,10 +95,10 @@ func Fuzz(data []byte) int {
 	grpcclient.RegisterFlags(fs)
 
 	err = fs.Parse([]string{
-		"--grpc_auth_static_client_creds",
+		"--grpc-auth-static-client-creds",
 		f.Name(),
 	})
-	require.NoError(t, err, "failed to set `--grpc_auth_static_client_creds=%s`", f.Name())
+	require.NoError(t, err, "failed to set `--grpc-auth-static-client-creds=%s`", f.Name())
 	client, err := dial(ctx, listener.Addr().String())
 	if err != nil {
 		fmt.Println("dial failed")
@@ -120,8 +119,8 @@ func Fuzz(data []byte) int {
 	ctx = newContext()
 	chunkSize := len(data) / 10
 	for i := 0; i < len(data); i = i + chunkSize {
-		from := i           //lower
-		to := i + chunkSize //upper
+		from := i           // lower
+		to := i + chunkSize // upper
 		_, _ = session.Execute(ctx, string(data[from:to]), nil)
 	}
 	return 1

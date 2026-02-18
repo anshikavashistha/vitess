@@ -20,16 +20,13 @@ package flagutil
 
 import (
 	"errors"
-	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/spf13/pflag"
 )
 
-var (
-	errInvalidKeyValuePair = errors.New("invalid key:value pair")
-)
+var errInvalidKeyValuePair = errors.New("invalid key:value pair")
 
 // StringListValue is a []string flag that accepts a comma separated
 // list of elements. To include an element containing a comma, quote
@@ -78,7 +75,7 @@ func (value *StringListValue) Set(v string) error {
 func (value StringListValue) String() string {
 	parts := make([]string, len(value))
 	for i, v := range value {
-		parts[i] = strings.Replace(strings.Replace(v, "\\", "\\\\", -1), ",", `\,`, -1)
+		parts[i] = strings.ReplaceAll(strings.ReplaceAll(v, "\\", "\\\\"), ",", `\,`)
 	}
 	return strings.Join(parts, ",")
 }
@@ -124,7 +121,7 @@ func (value StringMapValue) Get() any {
 func (value StringMapValue) String() string {
 	parts := make([]string, 0)
 	for k, v := range value {
-		parts = append(parts, k+":"+strings.Replace(v, ",", `\,`, -1))
+		parts = append(parts, k+":"+strings.ReplaceAll(v, ",", `\,`))
 	}
 	// Generate the string deterministically.
 	sort.Strings(parts)
@@ -136,67 +133,67 @@ func (value StringMapValue) Type() string { return "StringMap" }
 
 // DualFormatStringListVar creates a flag which supports both dashes and underscores
 func DualFormatStringListVar(fs *pflag.FlagSet, p *[]string, name string, value []string, usage string) {
-	dashes := strings.Replace(name, "_", "-", -1)
-	underscores := strings.Replace(name, "-", "_", -1)
+	dashes := strings.ReplaceAll(name, "_", "-")
+	underscores := strings.ReplaceAll(name, "-", "_")
 
 	StringListVar(fs, p, underscores, value, usage)
 	if dashes != underscores {
-		StringListVar(fs, p, dashes, *p, fmt.Sprintf("Synonym to -%s", underscores))
+		StringListVar(fs, p, dashes, *p, "Synonym to -"+underscores)
 	}
 }
 
 // DualFormatStringVar creates a flag which supports both dashes and underscores
 func DualFormatStringVar(fs *pflag.FlagSet, p *string, name string, value string, usage string) {
-	dashes := strings.Replace(name, "_", "-", -1)
-	underscores := strings.Replace(name, "-", "_", -1)
+	dashes := strings.ReplaceAll(name, "_", "-")
+	underscores := strings.ReplaceAll(name, "-", "_")
 
 	fs.StringVar(p, underscores, value, usage)
 	if dashes != underscores {
-		fs.StringVar(p, dashes, *p, fmt.Sprintf("Synonym to -%s", underscores))
+		fs.StringVar(p, dashes, *p, "Synonym to -"+underscores)
 	}
 }
 
 // DualFormatInt64Var creates a flag which supports both dashes and underscores
 func DualFormatInt64Var(fs *pflag.FlagSet, p *int64, name string, value int64, usage string) {
-	dashes := strings.Replace(name, "_", "-", -1)
-	underscores := strings.Replace(name, "-", "_", -1)
+	dashes := strings.ReplaceAll(name, "_", "-")
+	underscores := strings.ReplaceAll(name, "-", "_")
 
 	fs.Int64Var(p, underscores, value, usage)
 	if dashes != underscores {
-		fs.Int64Var(p, dashes, *p, fmt.Sprintf("Synonym to -%s", underscores))
+		fs.Int64Var(p, dashes, *p, "Synonym to -"+underscores)
 	}
 }
 
 // DualFormatIntVar creates a flag which supports both dashes and underscores
 func DualFormatIntVar(fs *pflag.FlagSet, p *int, name string, value int, usage string) {
-	dashes := strings.Replace(name, "_", "-", -1)
-	underscores := strings.Replace(name, "-", "_", -1)
+	dashes := strings.ReplaceAll(name, "_", "-")
+	underscores := strings.ReplaceAll(name, "-", "_")
 
 	fs.IntVar(p, underscores, value, usage)
 	if dashes != underscores {
-		fs.IntVar(p, dashes, *p, fmt.Sprintf("Synonym to -%s", underscores))
+		fs.IntVar(p, dashes, *p, "Synonym to -"+underscores)
 	}
 }
 
 // DualFormatBoolVar creates a flag which supports both dashes and underscores
 func DualFormatBoolVar(fs *pflag.FlagSet, p *bool, name string, value bool, usage string) {
-	dashes := strings.Replace(name, "_", "-", -1)
-	underscores := strings.Replace(name, "-", "_", -1)
+	dashes := strings.ReplaceAll(name, "_", "-")
+	underscores := strings.ReplaceAll(name, "-", "_")
 
 	fs.BoolVar(p, underscores, value, usage)
 	if dashes != underscores {
-		fs.BoolVar(p, dashes, *p, fmt.Sprintf("Synonym to -%s", underscores))
+		fs.BoolVar(p, dashes, *p, "Synonym to -"+underscores)
 	}
 }
 
 // DualFormatVar creates a flag which supports both dashes and underscores
 func DualFormatVar(fs *pflag.FlagSet, val pflag.Value, name string, usage string) {
-	dashes := strings.Replace(name, "_", "-", -1)
-	underscores := strings.Replace(name, "-", "_", -1)
+	dashes := strings.ReplaceAll(name, "_", "-")
+	underscores := strings.ReplaceAll(name, "-", "_")
 
 	fs.Var(val, underscores, usage)
 	if dashes != underscores {
-		fs.Var(val, dashes, fmt.Sprintf("Synonym to -%s", underscores))
+		fs.Var(val, dashes, "Synonym to -"+underscores)
 	}
 }
 

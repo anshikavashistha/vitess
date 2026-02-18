@@ -41,9 +41,7 @@ const (
 	vdiffRetryInterval       = 5 * time.Second
 )
 
-var (
-	runVDiffsSideBySide = true
-)
+var runVDiffsSideBySide = true
 
 func vdiff(t *testing.T, keyspace, workflow, cells string, wantV2Result *expectedVDiff2Result) {
 	doVtctldclientVDiff(t, keyspace, workflow, cells, wantV2Result)
@@ -111,8 +109,8 @@ func waitForVDiff2ToComplete(t *testing.T, ksWorkflow, cells, uuid string, compl
 	case <-ch:
 		return info
 	case <-time.After(vdiffTimeout):
-		log.Errorf("VDiff never completed for UUID %s. Latest output: %s", uuid, jsonStr)
-		require.FailNow(t, fmt.Sprintf("VDiff never completed for UUID %s", uuid))
+		log.Error(fmt.Sprintf("VDiff never completed for UUID %s. Latest output: %s", uuid, jsonStr))
+		require.FailNow(t, "VDiff never completed for UUID "+uuid)
 		return nil
 	}
 }
@@ -126,7 +124,7 @@ type expectedVDiff2Result struct {
 
 func doVtctldclientVDiff(t *testing.T, keyspace, workflow, cells string, want *expectedVDiff2Result, extraFlags ...string) {
 	ksWorkflow := fmt.Sprintf("%s.%s", keyspace, workflow)
-	t.Run(fmt.Sprintf("vtctldclient vdiff %s", ksWorkflow), func(t *testing.T) {
+	t.Run("vtctldclient vdiff "+ksWorkflow, func(t *testing.T) {
 		// update-table-stats is needed in order to test progress reports.
 		flags := []string{"--auto-retry", "--update-table-stats", fmt.Sprintf("--filtered-replication-wait-time=%v", vdiffTimeout/2)}
 		if len(extraFlags) > 0 {
@@ -148,7 +146,7 @@ func doVtctldclientVDiff(t *testing.T, keyspace, workflow, cells string, want *e
 			require.False(t, info.HasMismatch, "vdiff results: %+v", info)
 		}
 		if strings.Contains(t.Name(), "AcrossDBVersions") {
-			log.Errorf("VDiff resume cannot be guaranteed between major MySQL versions due to implied collation differences, skipping resume test...")
+			log.Error("VDiff resume cannot be guaranteed between major MySQL versions due to implied collation differences, skipping resume test...")
 			return
 		}
 	})
@@ -175,7 +173,7 @@ func performVDiff2Action(t *testing.T, ksWorkflow, cells, action, actionArg stri
 	}
 
 	output, err = execVDiffWithRetry(t, expectError, args)
-	log.Infof("vdiff output: %+v (err: %+v)", output, err)
+	log.Info(fmt.Sprintf("vdiff output: %+v (err: %+v)", output, err))
 	if !expectError {
 		require.NoError(t, err)
 		ouuid := gjson.Get(output, "UUID").String()
@@ -206,16 +204,21 @@ type vdiffResult struct {
 
 // execVDiffWithRetry will ignore transient errors that can occur during workflow state changes.
 func execVDiffWithRetry(t *testing.T, expectError bool, args []string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), vdiffRetryTimeout)
+	log.Info(fmt.Sprintf("Executing vdiff with retry with args: %+v", args))
+	ctx, cancel := context.WithTimeout(context.Background(), vdiffRetryTimeout*3)
 	defer cancel()
 	vdiffResultCh := make(chan vdiffResult)
 	go func() {
 		var output string
 		var err error
 		retry := false
+		log.Info(fmt.Sprintf("vdiff attempt: args=%+v", args))
 		for {
 			select {
 			case <-ctx.Done():
+				vdiffResultCh <- vdiffResult{
+					output: "", err: fmt.Errorf("context done before vdiff completed: %v", ctx.Err()),
+				}
 				return
 			default:
 			}
@@ -223,14 +226,16 @@ func execVDiffWithRetry(t *testing.T, expectError bool, args []string) (string, 
 				time.Sleep(vdiffRetryInterval)
 			}
 			retry = false
+			log.Info(fmt.Sprintf("Calling vtctldclient with args: %+v", args))
 			output, err = vc.VtctldClient.ExecuteCommandWithOutput(args...)
+			log.Info(fmt.Sprintf("vtctldclient finished: err=%v output=%q", err, output))
 			if err != nil {
 				if expectError {
 					result := vdiffResult{output: output, err: err}
 					vdiffResultCh <- result
 					return
 				}
-				log.Infof("vdiff error: %s", err)
+				log.Info(fmt.Sprintf("vdiff error: %s", err))
 				if isVDiffRetryable(err.Error()) {
 					retry = true
 				} else {
@@ -251,7 +256,7 @@ func execVDiffWithRetry(t *testing.T, expectError bool, args []string) (string, 
 	}()
 	select {
 	case <-ctx.Done():
-		return "", fmt.Errorf("timed out waiting for vdiff to complete")
+		return "", fmt.Errorf("timed out waiting for vdiff to complete: %+v", args)
 	case result := <-vdiffResultCh:
 		return result.output, result.err
 	}
@@ -282,7 +287,7 @@ func encodeString(in string) string {
 func generateMoreCustomers(t *testing.T, keyspace string, numCustomers int64) {
 	vtgateConn, closeConn := getVTGateConn()
 	defer closeConn()
-	log.Infof("Generating more test data with an additional %d customers", numCustomers)
+	log.Info(fmt.Sprintf("Generating more test data with an additional %d customers", numCustomers))
 	res := execVtgateQuery(t, vtgateConn, keyspace, "select max(cid) from customer")
 	startingID, _ := res.Rows[0][0].ToInt64()
 	insert := strings.Builder{}

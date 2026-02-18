@@ -29,6 +29,7 @@ import (
 
 	"vitess.io/vitess/go/ioutil"
 	"vitess.io/vitess/go/mysql/fakesqldb"
+	"vitess.io/vitess/go/netutil"
 	"vitess.io/vitess/go/sqltypes"
 	"vitess.io/vitess/go/vt/logutil"
 	tabletmanagerdatapb "vitess.io/vitess/go/vt/proto/tabletmanagerdata"
@@ -53,25 +54,25 @@ func TestMySQLShellBackupBackupPreCheck(t *testing.T) {
 			"empty flags",
 			"",
 			`{}`,
-			MySQLShellPreCheckError,
+			ErrMySQLShellPreCheck,
 		},
 		{
 			"only location",
 			"/dev/null",
 			"",
-			MySQLShellPreCheckError,
+			ErrMySQLShellPreCheck,
 		},
 		{
 			"only flags",
 			"",
 			"--js",
-			MySQLShellPreCheckError,
+			ErrMySQLShellPreCheck,
 		},
 		{
 			"both values present but without --js",
 			"",
 			"-h localhost",
-			MySQLShellPreCheckError,
+			ErrMySQLShellPreCheck,
 		},
 		{
 			"supported values",
@@ -83,13 +84,11 @@ func TestMySQLShellBackupBackupPreCheck(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			mysqlShellBackupLocation = tt.location
 			mysqlShellFlags = tt.flags
 			assert.ErrorIs(t, engine.backupPreCheck(path.Join(mysqlShellBackupLocation, "test")), tt.err)
 		})
 	}
-
 }
 
 func TestMySQLShellBackupRestorePreCheck(t *testing.T) {
@@ -106,25 +105,25 @@ func TestMySQLShellBackupRestorePreCheck(t *testing.T) {
 		{
 			"empty load flags",
 			`{}`,
-			MySQLShellPreCheckError,
+			ErrMySQLShellPreCheck,
 			false,
 		},
 		{
 			"only updateGtidSet",
 			`{"updateGtidSet": "replace"}`,
-			MySQLShellPreCheckError,
+			ErrMySQLShellPreCheck,
 			false,
 		},
 		{
 			"only progressFile",
 			`{"progressFile": ""}`,
-			MySQLShellPreCheckError,
+			ErrMySQLShellPreCheck,
 			false,
 		},
 		{
 			"both values but unsupported values",
 			`{"updateGtidSet": "append", "progressFile": "/tmp/test1"}`,
-			MySQLShellPreCheckError,
+			ErrMySQLShellPreCheck,
 			false,
 		},
 		{
@@ -149,7 +148,6 @@ func TestMySQLShellBackupRestorePreCheck(t *testing.T) {
 			assert.Equal(t, tt.shouldDeleteUsers, shouldDeleteUsers)
 		})
 	}
-
 }
 
 func TestMySQLShellBackupRestorePreCheckDisableRedolog(t *testing.T) {
@@ -159,25 +157,57 @@ func TestMySQLShellBackupRestorePreCheckDisableRedolog(t *testing.T) {
 	mysqlShellSpeedUpRestore = true
 	engine := MySQLShellBackupEngine{}
 
+	tests := []struct {
+		version string
+		err     error
+	}{
+		{
+			version: "mysqld  Ver 5.7.27-0ubuntu0.19.04.1 for Linux on x86_64 ((Ubuntu))",
+			err:     ErrMySQLShellPreCheck,
+		},
+		{
+			version: "mysqld  Ver 5.7.26 for linux-glibc2.12 on x86_64 (MySQL Community Server (GPL))",
+			err:     ErrMySQLShellPreCheck,
+		},
+		{
+			version: "mysqld  Ver 5.7.26-29 for Linux on x86_64 (Percona Server (GPL), Release 29, Revision 11ad961)",
+			err:     ErrMySQLShellPreCheck,
+		},
+		{
+			version: "mysqld  Ver 8.0.16 for linux-glibc2.12 on x86_64 (MySQL Community Server - GPL)",
+			err:     ErrMySQLShellPreCheck,
+		},
+		{
+			version: "mysqld  Ver 8.0.15-6 for Linux on x86_64 (Percona Server (GPL), Release 6, Revision 63abd08)",
+			err:     ErrMySQLShellPreCheck,
+		},
+		{
+			version: "mysqld  Ver 8.0.42-0ubuntu0.22.04.1 for Linux on x86_64 ((Ubuntu))",
+			err:     nil,
+		},
+		{
+			version: "mysqld  Ver 8.0.42-33 for Linux on x86_64 (Percona Server (GPL), Release '33', Revision '9dc49998')",
+			err:     nil,
+		},
+	}
+
 	fakedb := fakesqldb.New(t)
 	defer fakedb.Close()
-	fakeMysqld := NewFakeMysqlDaemon(fakedb) // defaults to 8.0.32
+	fakeMysqld := NewFakeMysqlDaemon(fakedb)
 	defer fakeMysqld.Close()
 
 	params := RestoreParams{
 		Mysqld: fakeMysqld,
 	}
 
-	// this should work as it is supported since 8.0.21
-	_, err := engine.restorePreCheck(context.Background(), params)
-	require.NoError(t, err, params)
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			fakeMysqld.Version = tt.version
 
-	// it should error out if we change to an older version
-	fakeMysqld.Version = "8.0.20"
-
-	_, err = engine.restorePreCheck(context.Background(), params)
-	require.ErrorIs(t, err, MySQLShellPreCheckError)
-	require.ErrorContains(t, err, "doesn't support disabling the redo log")
+			_, err := engine.restorePreCheck(context.Background(), params)
+			require.ErrorIs(t, err, tt.err)
+		})
+	}
 }
 
 func TestShouldDrainForBackupMySQLShell(t *testing.T) {
@@ -291,7 +321,7 @@ func TestCleanupMySQL(t *testing.T) {
 			if tt.shouldDeleteUsers {
 				for _, drop := range tt.expectedDropUsers {
 					mysql.ExpectedExecuteSuperQueryList = append(mysql.ExpectedExecuteSuperQueryList,
-						fmt.Sprintf("DROP USER %s", drop),
+						"DROP USER "+drop,
 					)
 				}
 			}
@@ -308,12 +338,11 @@ func TestCleanupMySQL(t *testing.T) {
 				"unexpected number of queries executed")
 		})
 	}
-
 }
 
 // this is a helper to write files in a temporary directory
 func generateTestFile(t *testing.T, name, contents string) {
-	f, err := os.OpenFile(name, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0700)
+	f, err := os.OpenFile(name, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o700)
 	require.NoError(t, err)
 	defer f.Close()
 	_, err = f.WriteString(contents)
@@ -373,6 +402,10 @@ func TestMySQLShellBackupEngine_ExecuteBackup_ReleaseLock(t *testing.T) {
 
 		require.Equal(t, mysqlShellBackupEngineName, manifest.BackupMethod)
 
+		if hostname, err := netutil.FullyQualifiedHostname(); err == nil {
+			require.Equal(t, hostname, manifest.Hostname)
+		}
+
 		// did we notice the lock was release and did we release it ours as well?
 		require.Contains(t, logger.String(), "global read lock released after",
 			"failed to release the global lock after mysqlsh")
@@ -425,5 +458,4 @@ func TestMySQLShellBackupEngine_ExecuteBackup_ReleaseLock(t *testing.T) {
 		require.ErrorContains(t, err, "mysqlshell failed")
 		require.False(t, mysql.GlobalReadLock) // lock must be released.
 	})
-
 }

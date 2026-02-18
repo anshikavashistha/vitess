@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -91,11 +92,11 @@ func startEtcd(t *testing.T, port int) (string, *exec.Cmd) {
 	t.Cleanup(func() {
 		// log error
 		if err := cmd.Process.Kill(); err != nil {
-			log.Errorf("cmd.Process.Kill() failed : %v", err)
+			log.Error(fmt.Sprintf("cmd.Process.Kill() failed : %v", err))
 		}
 		// log error
 		if err := cmd.Wait(); err != nil {
-			log.Errorf("cmd.wait() failed : %v", err)
+			log.Error(fmt.Sprintf("cmd.wait() failed : %v", err))
 		}
 	})
 
@@ -181,11 +182,11 @@ func startEtcdWithTLS(t *testing.T) (string, *tlstest.ClientServerKeyPairs) {
 	t.Cleanup(func() {
 		// log error
 		if err := cmd.Process.Kill(); err != nil {
-			log.Errorf("cmd.Process.Kill() failed : %v", err)
+			log.Error(fmt.Sprintf("cmd.Process.Kill() failed : %v", err))
 		}
 		// log error
 		if err := cmd.Wait(); err != nil {
-			log.Errorf("cmd.wait() failed : %v", err)
+			log.Error(fmt.Sprintf("cmd.wait() failed : %v", err))
 		}
 	})
 
@@ -250,8 +251,7 @@ func TestEtcd2Topo(t *testing.T) {
 	}
 
 	// Run the TopoServerTestSuite tests.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	test.TopoServerTestSuite(t, ctx, func() *topo.Server {
 		return newServer()
 	}, []string{})
@@ -275,7 +275,7 @@ func TestEtcd2TopoGetTabletsPartialResults(t *testing.T) {
 	cellClientAddrs := make([]string, len(cells))
 	cellClientCmds := make([]*exec.Cmd, len(cells))
 	cellTSs := make([]*topo.Server, len(cells))
-	for i := 0; i < len(cells); i++ {
+	for i := range cells {
 		addr, cmd := startEtcd(t, testfiles.GoVtTopoEtcd2topoPort+(i+100*i))
 		cellClientAddrs[i] = addr
 		cellClientCmds[i] = cmd
@@ -331,6 +331,12 @@ func TestEtcd2TopoGetTabletsPartialResults(t *testing.T) {
 	require.NoError(t, err, "Unexpected error: %v, output: %s", err, strings.Join(stdout, "\n"))
 	// We get each of the single tablets in each cell.
 	require.Len(t, stdout, len(cells))
+	// Filter out gRPC transport warnings emitted by the etcd v3.6 client
+	// during connection establishment.
+	stderr = slices.DeleteFunc(stderr, func(line string) bool {
+		return strings.Contains(line, "grpc: addrConn.createTransport failed to connect")
+	})
+
 	// And no error message.
 	require.Len(t, stderr, 0, "Unexpected error message: %s", strings.Join(stderr, "\n"))
 
@@ -359,6 +365,75 @@ func TestEtcd2TopoGetTabletsPartialResults(t *testing.T) {
 	for _, cellTS := range cellTSs {
 		cellTS.Close()
 	}
+}
+
+// TestEtcd2TopoServerClosed tests that operations on a closed server return
+// appropriate errors instead of panicking due to nil pointer dereference.
+func TestEtcd2TopoServerClosed(t *testing.T) {
+	// Start a single etcd in the background.
+	clientAddr, _ := startEtcd(t, 0)
+
+	testRoot := "/test-closed"
+
+	// Create the server on the new root.
+	ts, err := topo.OpenServer("etcd2", clientAddr, path.Join(testRoot, topo.GlobalCell))
+	require.NoError(t, err, "OpenServer() failed: %v", err)
+
+	// Create the CellInfo first.
+	ctx := context.Background()
+	err = ts.CreateCellInfo(ctx, "test_cell", &topodatapb.CellInfo{
+		ServerAddress: clientAddr,
+		Root:          path.Join(testRoot, "test_cell"),
+	})
+	require.NoError(t, err, "CreateCellInfo() failed: %v", err)
+
+	// Get the connection for the cell
+	conn, err := ts.ConnForCell(ctx, "test_cell")
+	require.NoError(t, err, "ConnForCell() failed: %v", err)
+
+	// Test that operations work before closing
+	testPath := "test_key"
+	testContents := []byte("test_value")
+
+	_, err = conn.Create(ctx, testPath, testContents)
+	require.NoError(t, err, "Create() before close should succeed")
+
+	// Close the connection
+	ts.Close()
+
+	// Test that operations return appropriate errors after closing
+	_, err = conn.Create(ctx, "another_key", testContents)
+	require.Error(t, err, "Create() after close should fail")
+	require.True(t, topo.IsErrType(err, topo.Interrupted), "Error should be topo.Interrupted, got: %v", err)
+
+	_, _, err = conn.Get(ctx, testPath)
+	require.Error(t, err, "Get() after close should fail")
+	require.True(t, topo.IsErrType(err, topo.Interrupted), "Error should be topo.Interrupted, got: %v", err)
+
+	_, err = conn.GetVersion(ctx, testPath, 1)
+	require.Error(t, err, "GetVersion() after close should fail")
+	require.True(t, topo.IsErrType(err, topo.Interrupted), "Error should be topo.Interrupted, got: %v", err)
+
+	err = conn.Delete(ctx, testPath, nil)
+	require.Error(t, err, "Delete() after close should fail")
+	require.True(t, topo.IsErrType(err, topo.Interrupted), "Error should be topo.Interrupted, got: %v", err)
+
+	_, err = conn.List(ctx, "/")
+	require.Error(t, err, "List() after close should fail")
+	require.True(t, topo.IsErrType(err, topo.Interrupted), "Error should be topo.Interrupted, got: %v", err)
+
+	_, err = conn.Update(ctx, testPath, testContents, nil)
+	require.Error(t, err, "Update() after close should fail")
+	require.True(t, topo.IsErrType(err, topo.Interrupted), "Error should be topo.Interrupted, got: %v", err)
+
+	// Test watch operations after close
+	_, _, err = conn.Watch(ctx, testPath)
+	require.Error(t, err, "Watch() after close should fail")
+	require.True(t, topo.IsErrType(err, topo.Interrupted), "Error should be topo.Interrupted, got: %v", err)
+
+	_, _, err = conn.WatchRecursive(ctx, "/")
+	require.Error(t, err, "WatchRecursive() after close should fail")
+	require.True(t, topo.IsErrType(err, topo.Interrupted), "Error should be topo.Interrupted, got: %v", err)
 }
 
 // testKeyspaceLock tests etcd-specific heartbeat (TTL).

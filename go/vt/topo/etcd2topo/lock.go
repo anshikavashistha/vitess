@@ -31,12 +31,11 @@ import (
 	"vitess.io/vitess/go/vt/proto/vtrpc"
 	"vitess.io/vitess/go/vt/servenv"
 	"vitess.io/vitess/go/vt/topo"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vterrors"
 )
 
-var (
-	leaseTTL = 30 // This is the default used for all non-named locks
-)
+var leaseTTL = 30 // This is the default used for all non-named locks
 
 func init() {
 	for _, cmd := range topo.FlagBinaries {
@@ -45,7 +44,7 @@ func init() {
 }
 
 func registerEtcd2TopoLockFlags(fs *pflag.FlagSet) {
-	fs.IntVar(&leaseTTL, "topo_etcd_lease_ttl", leaseTTL, "Lease TTL for locks and leader election. The client will use KeepAlive to keep the lease going.")
+	utils.SetFlagIntVar(fs, &leaseTTL, "topo-etcd-lease-ttl", leaseTTL, "Lease TTL for locks and leader election. The client will use KeepAlive to keep the lease going.")
 }
 
 // newUniqueEphemeralKV creates a new file in the provided directory.
@@ -71,7 +70,7 @@ func (s *Server) newUniqueEphemeralKV(ctx context.Context, cli *clientv3.Client,
 			// node behind for *leaseTTL time.
 
 			if _, err := cli.Delete(context.Background(), newKey); err != nil {
-				log.Errorf("cli.Delete(context.Background(), newKey) failed :%v", err)
+				log.Error(fmt.Sprintf("cli.Delete(context.Background(), newKey) failed :%v", err))
 			}
 		}
 		return "", 0, convertError(err, newKey)
@@ -149,7 +148,7 @@ func (s *Server) TryLock(ctx context.Context, dirPath, contents string) (topo.Lo
 	// Throw error in this case
 	for _, e := range entries {
 		if e.Name == locksPath && e.Type == topo.TypeDirectory && e.Ephemeral {
-			return nil, topo.NewError(topo.NodeExists, fmt.Sprintf("lock already exists at path %s", dirPath))
+			return nil, topo.NewError(topo.NodeExists, "lock already exists at path "+dirPath)
 		}
 	}
 
@@ -225,7 +224,7 @@ func (s *Server) lock(ctx context.Context, nodePath, contents string, ttl int) (
 			// We had an error waiting on the last node.
 			// Revoke our lease, this will delete the file.
 			if _, rerr := s.cli.Revoke(context.Background(), lease.ID); rerr != nil {
-				log.Warningf("Revoke(%d) failed, may have left %v behind: %v", lease.ID, key, rerr)
+				log.Warn(fmt.Sprintf("Revoke(%d) failed, may have left %v behind: %v", lease.ID, key, rerr))
 			}
 			return nil, err
 		}

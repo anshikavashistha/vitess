@@ -45,6 +45,7 @@ type (
 		bindVars  map[string]*querypb.BindVariable
 		reserved  *ReservedVars
 		vals      map[Literal]string
+		tupleVals map[string]string
 		err       error
 		inDerived int
 		inSelect  int
@@ -62,15 +63,17 @@ type (
 
 		onLeave      map[*AliasedExpr]func(*AliasedExpr)
 		parameterize bool
+		useASTQuery  bool
 	}
 	// RewriteASTResult holds the result of rewriting the AST, including bind variable needs.
 	RewriteASTResult struct {
 		*BindVarNeeds
-		AST Statement // The rewritten AST
+		AST                Statement // The rewritten AST
+		UpdateQueryFromAST bool
 	}
 	// VSchemaViews provides access to view definitions within the VSchema.
 	VSchemaViews interface {
-		FindView(name TableName) TableStatement
+		FindView(name TableName) (TableStatement, *TableName)
 	}
 )
 
@@ -99,8 +102,8 @@ var funcRewrites = map[string]string{
 	"row_count":      RowCountName,
 }
 
-// PrepareAST normalizes the input SQL statement and returns the rewritten AST along with bind variable information.
-func PrepareAST(
+// Normalize normalizes the input SQL statement and returns the rewritten AST along with bind variable information.
+func Normalize(
 	in Statement,
 	reservedVars *ReservedVars,
 	bindVars map[string]*querypb.BindVariable,
@@ -114,16 +117,18 @@ func PrepareAST(
 ) (*RewriteASTResult, error) {
 	nz := newNormalizer(reservedVars, bindVars, keyspace, selectLimit, setVarComment, sysVars, fkChecksState, views, parameterize)
 	nz.shouldRewriteDatabaseFunc = shouldRewriteDatabaseFunc(in)
+	nz.determineQueryRewriteStrategy(in)
+
 	out := SafeRewrite(in, nz.walkDown, nz.walkUp)
 	if nz.err != nil {
 		return nil, nz.err
 	}
 
-	r := &RewriteASTResult{
-		AST:          out.(Statement),
-		BindVarNeeds: nz.bindVarNeeds,
-	}
-	return r, nil
+	return &RewriteASTResult{
+		AST:                out.(Statement),
+		BindVarNeeds:       nz.bindVarNeeds,
+		UpdateQueryFromAST: nz.useASTQuery,
+	}, nil
 }
 
 func newNormalizer(
@@ -141,6 +146,7 @@ func newNormalizer(
 		bindVars:      bindVars,
 		reserved:      reserved,
 		vals:          make(map[Literal]string),
+		tupleVals:     make(map[string]string),
 		bindVarNeeds:  &BindVarNeeds{},
 		keyspace:      keyspace,
 		selectLimit:   selectLimit,
@@ -153,25 +159,34 @@ func newNormalizer(
 	}
 }
 
+func (nz *normalizer) determineQueryRewriteStrategy(in Statement) {
+	switch in.(type) {
+	case *Select, *Union, *Insert, *Update, *Delete, *CallProc, *Stream, *VExplainStmt:
+		nz.useASTQuery = true
+	case *Set:
+		nz.useASTQuery = true
+		nz.parameterize = false
+	default:
+		nz.parameterize = false
+	}
+}
+
 // walkDown processes nodes when traversing down the AST.
 // It handles normalization logic based on node types.
 func (nz *normalizer) walkDown(node, _ SQLNode) bool {
 	switch node := node.(type) {
+	case *Begin, *Commit, *Rollback, *Savepoint, *SRollback, *Release, *OtherAdmin, *Analyze,
+		*PrepareStmt, *ExecuteStmt, *FramePoint, *ColName, TableName, *ConvertType, *CreateProcedure:
+		// These statement do not need normalizing
+		return false
 	case *AssignmentExpr:
 		nz.err = vterrors.VT12001("Assignment expression")
 		return false
-	case *Begin, *Commit, *Rollback, *Savepoint, *SRollback, *Release, *OtherAdmin, *Analyze,
-		*PrepareStmt, *ExecuteStmt, *FramePoint, *ColName, TableName, *ConvertType:
-		// These statement don't need normalizing
-		return false
-	case *Set:
-		// Disable parameterization within SET statements.
-		nz.parameterize = false
 	case *DerivedTable:
 		nz.inDerived++
 	case *Select:
 		nz.inSelect++
-		if nz.selectLimit > 0 && node.Limit == nil {
+		if nz.selectLimit > 0 && node.Limit == nil && nz.inSelect == 1 {
 			node.Limit = &Limit{Rowcount: NewIntLiteral(strconv.Itoa(nz.selectLimit))}
 		}
 	case *AliasedExpr:
@@ -219,18 +234,22 @@ func (nz *normalizer) noteAliasedExprName(node *AliasedExpr) {
 // It finalizes normalization logic based on node types.
 func (nz *normalizer) walkUp(cursor *Cursor) bool {
 	// Add SET_VAR comments if applicable.
-	if supportOptimizerHint, supports := cursor.Node().(SupportOptimizerHint); supports {
+	if stmt, supports := cursor.Node().(SupportOptimizerHint); supports {
 		if nz.setVarComment != "" {
-			newComments, err := supportOptimizerHint.GetParsedComments().AddQueryHint(nz.setVarComment)
+			newComments, err := stmt.GetParsedComments().AddQueryHint(nz.setVarComment)
 			if err != nil {
 				nz.err = err
 				return false
 			}
-			supportOptimizerHint.SetComments(newComments)
+			stmt.SetComments(newComments)
+			nz.useASTQuery = true
 		}
+
+		// use foreign key checks of normalizer and set the query hint in the query.
 		if nz.fkChecksState != nil {
-			newComments := supportOptimizerHint.GetParsedComments().SetMySQLSetVarValue(sysvars.ForeignKeyChecks, FkChecksStateString(nz.fkChecksState))
-			supportOptimizerHint.SetComments(newComments)
+			newComments := stmt.GetParsedComments().SetMySQLSetVarValue(sysvars.ForeignKeyChecks, FkChecksStateString(nz.fkChecksState))
+			stmt.SetComments(newComments)
+			nz.useASTQuery = true
 		}
 	}
 
@@ -453,8 +472,22 @@ func (nz *normalizer) rewriteInComparisons(node *ComparisonExpr) {
 			Value: bval.Value,
 		})
 	}
-	bvname := nz.reserved.nextUnusedVar()
-	nz.bindVars[bvname] = bvals
+
+	var bvname string
+
+	if key, err := bvals.MarshalVT(); err != nil {
+		bvname = nz.reserved.nextUnusedVar()
+		nz.bindVars[bvname] = bvals
+	} else {
+		// Check if we can find key in tuplevals
+		if bvname, ok = nz.tupleVals[string(key)]; !ok {
+			bvname = nz.reserved.nextUnusedVar()
+		}
+
+		nz.bindVars[bvname] = bvals
+		nz.tupleVals[string(key)] = bvname
+	}
+
 	node.Right = ListArg(bvname)
 }
 
@@ -558,7 +591,7 @@ func shouldRewriteDatabaseFunc(in Statement) bool {
 
 // rewriteUnion sets the SELECT limit for UNION statements if not already set.
 func (nz *normalizer) rewriteUnion(node *Union) {
-	if nz.selectLimit > 0 && node.Limit == nil {
+	if nz.selectLimit > 0 && node.Limit == nil && nz.inSelect == 0 {
 		node.Limit = &Limit{Rowcount: NewIntLiteral(strconv.Itoa(nz.selectLimit))}
 	}
 }
@@ -586,18 +619,38 @@ func (nz *normalizer) rewriteAliasedTable(cursor *Cursor, node *AliasedTableExpr
 	}
 
 	// Replace views with their underlying definitions.
+	nz.rewriteView(aliasTableName, node)
+}
+
+// rewriteView looks up viewName in the view definitions and, if found, replaces the table
+// reference with a derived table containing the view's SELECT. If a view routing rule matched
+// but the target view definition is missing, the table name is rewritten to the routed target
+// so that error messages reference the intended destination rather than the original source name.
+func (nz *normalizer) rewriteView(viewName TableName, node *AliasedTableExpr) {
 	if nz.views == nil {
 		return
 	}
-	view := nz.views.FindView(aliasTableName)
-	if view == nil {
+
+	view, routedViewName := nz.views.FindView(viewName)
+
+	// If the view was found, substitute the view's SELECT as a derived table.
+	if view != nil {
+		node.Expr = &DerivedTable{Select: Clone(view)}
+
+		// If an alias wasn't already set, use the view name as the alias so that references to
+		// the view like `view.col` continue to resolve.
+		if node.As.IsEmpty() {
+			node.As = NewIdentifierCS(viewName.Name.String())
+		}
+
 		return
 	}
 
-	// Substitute the view with a derived table.
-	node.Expr = &DerivedTable{Select: Clone(view)}
-	if node.As.IsEmpty() {
-		node.As = NewIdentifierCS(tblName)
+	// The view definition was not found. If a routing rule was found, rewrite the view name
+	// to the target view name so any subsequent "table not found" error points the user at
+	// the routed destination and not the original source.
+	if routedViewName != nil {
+		node.Expr = *routedViewName
 	}
 }
 
@@ -631,14 +684,22 @@ func (nz *normalizer) rewriteNotExpr(cursor *Cursor, node *NotExpr) {
 
 // rewriteVariable handles the rewriting of variable expressions to bind variables.
 func (nz *normalizer) rewriteVariable(cursor *Cursor, node *Variable) {
-	// Do not rewrite variables on the left side of SET assignments.
+	// Only rewrite scope for variables on the left side of SET assignments.
 	if v, isSet := cursor.Parent().(*SetExpr); isSet && v.Var == node {
+		if node.Scope == NoScope {
+			// We rewrite the NoScope to session scope for SET statements
+			// that we plan. Previously we used to do this during parsing itself,
+			// but we needed to change that to allow for set statements in a
+			// create procedure statement that sometimes set locally defined variables
+			// that aren't in the session scope.
+			node.Scope = SessionScope
+		}
 		return
 	}
 	switch node.Scope {
 	case VariableScope:
 		nz.udvRewrite(cursor, node)
-	case SessionScope, NextTxScope:
+	case SessionScope, NextTxScope, NoScope:
 		nz.sysVarRewrite(cursor, node)
 	}
 }
@@ -702,6 +763,7 @@ func (nz *normalizer) sysVarRewrite(cursor *Cursor, node *Variable) {
 		sysvars.Version.Name,
 		sysvars.VersionComment.Name,
 		sysvars.QueryTimeout.Name,
+		sysvars.TransactionTimeout.Name,
 		sysvars.Workload.Name:
 		found = true
 	}
@@ -832,7 +894,7 @@ func (nz *normalizer) rewriteDistinctableAggr(node DistinctableAggr) {
 }
 
 func (nz *normalizer) shouldParameterize() bool {
-	return !(nz.inDerived > 0 && len(nz.onLeave) > 0) && nz.parameterize
+	return (nz.inDerived <= 0 || len(nz.onLeave) <= 0) && nz.parameterize
 }
 
 // SystemSchema checks if the given schema is a system schema.

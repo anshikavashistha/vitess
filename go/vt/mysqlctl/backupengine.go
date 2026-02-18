@@ -35,17 +35,18 @@ import (
 	"vitess.io/vitess/go/vt/logutil"
 	"vitess.io/vitess/go/vt/mysqlctl/backupstats"
 	"vitess.io/vitess/go/vt/mysqlctl/backupstorage"
-	tabletmanagerdatapb "vitess.io/vitess/go/vt/proto/tabletmanagerdata"
 	"vitess.io/vitess/go/vt/proto/vtrpc"
 	"vitess.io/vitess/go/vt/servenv"
 	"vitess.io/vitess/go/vt/topo"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vterrors"
+
+	tabletmanagerdatapb "vitess.io/vitess/go/vt/proto/tabletmanagerdata"
+	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
 )
 
-var (
-	// backupEngineImplementation is the implementation to use for BackupEngine
-	backupEngineImplementation = builtinBackupEngineName
-)
+// backupEngineImplementation is the implementation to use for BackupEngine
+var backupEngineImplementation = builtinBackupEngineName
 
 type BackupResult int
 
@@ -79,6 +80,7 @@ type BackupParams struct {
 	Shard    string
 	// TabletAlias is used along with backupTime to construct the backup name
 	TabletAlias string
+	TabletType  topodatapb.TabletType
 	// BackupTime is the time at which the backup is being started
 	BackupTime time.Time
 	// Position of last known backup. If non empty, then this value indicates the backup should be incremental
@@ -92,6 +94,8 @@ type BackupParams struct {
 	MysqlShutdownTimeout time.Duration
 	// BackupEngine allows us to override which backup engine should be used for a request
 	BackupEngine string
+	// Any SQL that you would like to run before initializing the backup.
+	InitSQL *tabletmanagerdatapb.BackupRequest_InitSQL
 }
 
 func (b *BackupParams) Copy() BackupParams {
@@ -105,11 +109,13 @@ func (b *BackupParams) Copy() BackupParams {
 		Keyspace:             b.Keyspace,
 		Shard:                b.Shard,
 		TabletAlias:          b.TabletAlias,
+		TabletType:           b.TabletType,
 		BackupTime:           b.BackupTime,
 		IncrementalFromPos:   b.IncrementalFromPos,
 		Stats:                b.Stats,
 		UpgradeSafe:          b.UpgradeSafe,
 		MysqlShutdownTimeout: b.MysqlShutdownTimeout,
+		InitSQL:              b.InitSQL,
 	}
 }
 
@@ -118,13 +124,13 @@ type RestoreParams struct {
 	Cnf    *Mycnf
 	Mysqld MysqlDaemon
 	Logger logutil.Logger
-	// Concurrency is the value of --restore_concurrency flag (init restore parameter)
+	// Concurrency is the value of --restore-concurrency flag (init restore parameter)
 	// It determines how many files are processed in parallel
 	Concurrency int
 	// Extra env variables for pre-restore and post-restore transform hooks
 	HookExtraEnv map[string]string
 	// DeleteBeforeRestore tells us whether existing data should be deleted before
-	// restoring. This is always set to false when starting a tablet with -restore_from_backup,
+	// restoring. This is always set to false when starting a tablet with -restore-from-backup,
 	// but is set to true when executing a RestoreFromBackup command on an already running vttablet
 	DeleteBeforeRestore bool
 	// DbName is the name of the managed database / schema
@@ -211,7 +217,7 @@ func isIncrementalBackup(params BackupParams) bool {
 }
 
 func registerBackupEngineFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&backupEngineImplementation, "backup_engine_implementation", backupEngineImplementation, "Specifies which implementation to use for creating new backups (builtin or xtrabackup). Restores will always be done with whichever engine created a given backup.")
+	utils.SetFlagStringVar(fs, &backupEngineImplementation, "backup-engine-implementation", backupEngineImplementation, "Specifies which implementation to use for creating new backups (builtin or xtrabackup). Restores will always be done with whichever engine created a given backup.")
 }
 
 // GetBackupEngine returns the BackupEngine implementation that should be used
@@ -325,6 +331,8 @@ type BackupManifest struct {
 	ServerUUID string
 
 	TabletAlias string
+
+	Hostname string
 
 	Keyspace string
 
@@ -613,12 +621,14 @@ func FindBackupToRestore(ctx context.Context, params RestoreParams, bhs []backup
 
 // See https://github.com/mysql/mysql-server/commit/9a940abe085fc75e1ffe7b72286927fdc9f11207 for the
 // importance of this specific version and why downgrades within patches are allowed since that version.
-var mysql8035 = ServerVersion{Major: 8, Minor: 0, Patch: 35}
-var ltsVersions = []ServerVersion{
-	{Major: 5, Minor: 7, Patch: 0},
-	{Major: 8, Minor: 0, Patch: 0},
-	{Major: 8, Minor: 4, Patch: 0},
-}
+var (
+	mysql8035   = ServerVersion{Major: 8, Minor: 0, Patch: 35}
+	ltsVersions = []ServerVersion{
+		{Major: 5, Minor: 7, Patch: 0},
+		{Major: 8, Minor: 0, Patch: 0},
+		{Major: 8, Minor: 4, Patch: 0},
+	}
+)
 
 func validateMySQLVersionUpgradeCompatible(to string, from string, upgradeSafe bool) error {
 	// It's always safe to use the same version.

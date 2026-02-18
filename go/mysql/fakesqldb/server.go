@@ -198,16 +198,14 @@ func NewWithEnv(t testing.TB, env *vtenv.Environment) *DB {
 	authServer := mysql.NewAuthServerNone()
 
 	// Start listening.
-	db.listener, err = mysql.NewListener("unix", socketFile, authServer, db, 0, 0, false, false, 0, 0)
+	db.listener, err = mysql.NewListener("unix", socketFile, authServer, db, 0, 0, false, false, 0, 0, false)
 	if err != nil {
 		t.Fatalf("NewListener failed: %v", err)
 	}
 
-	db.acceptWG.Add(1)
-	go func() {
-		defer db.acceptWG.Done()
+	db.acceptWG.Go(func() {
 		db.listener.Accept()
-	}()
+	})
 
 	db.AddQuery(useQuery, &sqltypes.Result{})
 	// Return the db.
@@ -329,7 +327,7 @@ func (db *DB) NewConnection(c *mysql.Conn) {
 	defer db.mu.Unlock()
 
 	if db.isConnFail.Load() {
-		panic(fmt.Errorf("simulating a connection failure"))
+		panic(errors.New("simulating a connection failure"))
 	}
 
 	if db.connDelay != 0 {
@@ -356,6 +354,25 @@ func (db *DB) ConnectionClosed(c *mysql.Conn) {
 // ComQuery is part of the mysql.Handler interface.
 func (db *DB) ComQuery(c *mysql.Conn, query string, callback func(*sqltypes.Result) error) error {
 	return db.Handler.HandleQuery(c, query, callback)
+}
+
+func (db *DB) ComQueryMulti(c *mysql.Conn, sql string, callback func(qr sqltypes.QueryResponse, more bool, firstPacket bool) error) error {
+	qries, err := db.Env().Parser().SplitStatementToPieces(sql)
+	if err != nil {
+		return err
+	}
+	for i, query := range qries {
+		firstPacket := true
+		err = db.ComQuery(c, query, func(result *sqltypes.Result) error {
+			err = callback(sqltypes.QueryResponse{QueryResult: result}, i < len(qries)-1, firstPacket)
+			firstPacket = false
+			return err
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // WarningCount is part of the mysql.Handler interface.
@@ -394,7 +411,7 @@ func (db *DB) HandleQuery(c *mysql.Conn, query string, callback func(*sqltypes.R
 
 		// log error
 		if err := callback(&sqltypes.Result{}); err != nil {
-			log.Errorf("callback failed : %v", err)
+			log.Error(fmt.Sprintf("callback failed : %v", err))
 		}
 		return nil
 	}
@@ -407,7 +424,7 @@ func (db *DB) HandleQuery(c *mysql.Conn, query string, callback func(*sqltypes.R
 
 		// log error
 		if err := callback(&sqltypes.Result{}); err != nil {
-			log.Errorf("callback failed : %v", err)
+			log.Error(fmt.Sprintf("callback failed : %v", err))
 		}
 		return nil
 	}
@@ -452,7 +469,7 @@ func (db *DB) HandleQuery(c *mysql.Conn, query string, callback func(*sqltypes.R
 	parser := sqlparser.NewTestParser()
 	err = fmt.Errorf("fakesqldb:: query: '%s' is not supported on %v",
 		parser.TruncateForUI(query), db.name)
-	log.Errorf("Query not found: %s", parser.TruncateForUI(query))
+	log.Error("Query not found: " + parser.TruncateForUI(query))
 
 	return err
 }
@@ -525,8 +542,8 @@ func (db *DB) comQueryOrdered(query string) (*sqltypes.Result, error) {
 }
 
 // ComPrepare is part of the mysql.Handler interface.
-func (db *DB) ComPrepare(c *mysql.Conn, query string, bindVars map[string]*querypb.BindVariable) ([]*querypb.Field, error) {
-	return nil, nil
+func (db *DB) ComPrepare(*mysql.Conn, string) ([]*querypb.Field, uint16, error) {
+	return nil, 0, nil
 }
 
 // ComStmtExecute is part of the mysql.Handler interface.

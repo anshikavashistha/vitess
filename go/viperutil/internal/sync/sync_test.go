@@ -98,10 +98,10 @@ func TestWatchConfig(t *testing.T) {
 	// Check that default values are actually used
 	require.Equal(t, B.Get(), B.Default())
 
-	A.(*value.Dynamic[int]).Base.BoundGetFunc = vipersync.AdaptGetter("a", func(v *viper.Viper) func(key string) int {
+	A.(*value.Dynamic[int]).BoundGetFunc = vipersync.AdaptGetter("a", func(v *viper.Viper) func(key string) int {
 		return v.GetInt
 	}, sv)
-	B.(*value.Dynamic[int]).Base.BoundGetFunc = vipersync.AdaptGetter("b", func(v *viper.Viper) func(key string) int {
+	B.(*value.Dynamic[int]).BoundGetFunc = vipersync.AdaptGetter("b", func(v *viper.Viper) func(key string) int {
 		return v.GetInt
 	}, sv)
 
@@ -121,7 +121,7 @@ func TestWatchConfig(t *testing.T) {
 		return time.Duration(jitter(75, 125)) * time.Millisecond
 	}
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -145,7 +145,7 @@ func TestWatchConfig(t *testing.T) {
 		}(i)
 	}
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		require.NoError(t, writeRandomConfig(tmp))
 		time.Sleep(writeJitter())
 	}

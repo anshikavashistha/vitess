@@ -330,7 +330,6 @@ func TestCFCComputeKsidXxhash(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func TestCFCVerifyNoHash(t *testing.T) {
@@ -365,7 +364,6 @@ func TestCFCVerifyWithHash(t *testing.T) {
 	out, err = pcfc.Verify(context.Background(), nil, []sqltypes.Value{sqltypes.NewVarBinary(string(flattenKey(id)))}, [][]byte{expectedHash(id)})
 	assert.NoError(t, err)
 	assert.EqualValues(t, []bool{true}, out)
-
 }
 
 func TestCFCMap(t *testing.T) {
@@ -405,7 +403,7 @@ func TestCFCPrefixMap(t *testing.T) {
 	cases := []struct {
 		testName string
 		id       string
-		dest     key.Destination
+		dest     key.ShardDestination
 	}{
 		{
 			testName: "literal regular",
@@ -540,7 +538,7 @@ func TestCFCFindPrefixEscape(t *testing.T) {
 func TestDestinationKeyRangeFromPrefix(t *testing.T) {
 	testCases := []struct {
 		start []byte
-		dest  key.Destination
+		dest  key.ShardDestination
 	}{
 		{
 			start: []byte{3, 123, 255},

@@ -34,6 +34,7 @@ import (
 	"vitess.io/vitess/go/vt/log"
 	tabletmanagerdatapb "vitess.io/vitess/go/vt/proto/tabletmanagerdata"
 	"vitess.io/vitess/go/vt/schema"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vttablet/tabletserver/throttle/throttlerapp"
 
 	"vitess.io/vitess/go/test/endtoend/cluster"
@@ -146,23 +147,23 @@ func TestMain(m *testing.M) {
 		defer clusterInstance.Teardown()
 
 		if _, err := os.Stat(schemaChangeDirectory); os.IsNotExist(err) {
-			_ = os.Mkdir(schemaChangeDirectory, 0700)
+			_ = os.Mkdir(schemaChangeDirectory, 0o700)
 		}
 
 		clusterInstance.VtctldExtraArgs = []string{
-			"--schema_change_dir", schemaChangeDirectory,
-			"--schema_change_controller", "local",
-			"--schema_change_check_interval", "1s",
+			"--schema-change-dir", schemaChangeDirectory,
+			"--schema-change-controller", "local",
+			"--schema-change-check-interval", "1s",
 		}
 
 		clusterInstance.VtTabletExtraArgs = []string{
-			"--heartbeat_interval", "250ms",
-			"--heartbeat_on_demand_duration", "5s",
-			"--migration_check_interval", "5s",
-			"--watch_replication_stream",
+			utils.GetFlagVariantForTests("--heartbeat-interval"), "250ms",
+			utils.GetFlagVariantForTests("--heartbeat-on-demand-duration"), "5s",
+			utils.GetFlagVariantForTests("--migration-check-interval"), "5s",
+			utils.GetFlagVariantForTests("--watch-replication-stream"),
 		}
 		clusterInstance.VtGateExtraArgs = []string{
-			"--ddl_strategy", "online",
+			utils.GetFlagVariantForTests("--ddl-strategy"), "online",
 		}
 
 		if err := clusterInstance.StartTopo(); err != nil {
@@ -175,7 +176,7 @@ func TestMain(m *testing.M) {
 		}
 
 		// No need for replicas in this stress test
-		if err := clusterInstance.StartKeyspace(*keyspace, []string{"1"}, 0, false); err != nil {
+		if err := clusterInstance.StartKeyspace(*keyspace, []string{"1"}, 0, false, clusterInstance.Cell); err != nil {
 			return 1, err
 		}
 
@@ -199,7 +200,6 @@ func TestMain(m *testing.M) {
 	} else {
 		os.Exit(exitcode)
 	}
-
 }
 
 func TestRevertSchemaChanges(t *testing.T) {
@@ -207,14 +207,13 @@ func TestRevertSchemaChanges(t *testing.T) {
 	require.Equal(t, 1, len(shards))
 
 	throttler.EnableLagThrottlerAndWaitForStatus(t, clusterInstance)
-	throttler.WaitForCheckThrottlerResult(t, clusterInstance, primaryTablet, throttlerapp.TestingName, nil, tabletmanagerdatapb.CheckThrottlerResponseCode_OK, time.Minute)
+	throttler.WaitForCheckThrottlerResult(t, &clusterInstance.VtctldClientProcess, primaryTablet, throttlerapp.TestingName, nil, tabletmanagerdatapb.CheckThrottlerResponseCode_OK, time.Minute)
 
 	t.Run("revertible", testRevertible)
 	t.Run("revert", testRevert)
 }
 
 func testRevertible(t *testing.T) {
-
 	fkOnlineDDLPossible := false
 	t.Run("check 'rename_table_preserve_foreign_key' variable", func(t *testing.T) {
 		// Online DDL is not possible on vanilla MySQL 8.0 for reasons described in https://vitess.io/blog/2021-06-15-online-ddl-why-no-fk/.
@@ -236,7 +235,7 @@ func testRevertible(t *testing.T) {
 		t.Logf("MySQL support for 'rename_table_preserve_foreign_key': %v", fkOnlineDDLPossible)
 	})
 
-	var testCases = []revertibleTestCase{
+	testCases := []revertibleTestCase{
 		{
 			name:       "identical schemas",
 			fromSchema: `id int primary key, i1 int not null default 0`,
@@ -389,7 +388,7 @@ func testRevertible(t *testing.T) {
 	onlineddl.VtgateExecQuery(t, &vtParams, createParentTable, "")
 
 	removeBackticks := func(s string) string {
-		return strings.Replace(s, "`", "", -1)
+		return strings.ReplaceAll(s, "`", "")
 	}
 
 	for _, testcase := range testCases {
@@ -418,7 +417,7 @@ func testRevertible(t *testing.T) {
 				toStatement := fmt.Sprintf(createTableWrapper, testcase.toSchema)
 				uuid = testOnlineDDLStatement(t, toStatement, ddlStrategy, "vtgate", tableName, "")
 				if !onlineddl.CheckMigrationStatus(t, &vtParams, shards, uuid, schema.OnlineDDLStatusComplete) {
-					resp, err := throttler.CheckThrottler(clusterInstance, primaryTablet, throttlerapp.TestingName, nil)
+					resp, err := throttler.CheckThrottler(&clusterInstance.VtctldClientProcess, primaryTablet, throttlerapp.TestingName, nil)
 					assert.NoError(t, err)
 					fmt.Println("Throttler check response: ", resp)
 
@@ -501,7 +500,6 @@ func testRevertible(t *testing.T) {
 }
 
 func testRevert(t *testing.T) {
-
 	var (
 		partitionedTableName = `part_test`
 		createStatement      = `
@@ -859,7 +857,7 @@ func testRevert(t *testing.T) {
 	// If they fail, it has nothing to do with revert.
 	// We run these tests because we expect their functionality to work in the next step.
 	var alterHints []string
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		testName := fmt.Sprintf("online ALTER TABLE %d", i)
 		hint := fmt.Sprintf("hint-alter-%d", i)
 		alterHints = append(alterHints, hint)
@@ -871,11 +869,9 @@ func testRevert(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			var wg sync.WaitGroup
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				runMultipleConnections(ctx, t)
-			}()
+			})
 
 			func() {
 				// Ensures runMultipleConnections completes before the overall
@@ -900,11 +896,9 @@ func testRevert(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			runMultipleConnections(ctx, t)
-		}()
+		})
 
 		func() {
 			// Ensures runMultipleConnections completes before the overall
@@ -928,11 +922,9 @@ func testRevert(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			runMultipleConnections(ctx, t)
-		}()
+		})
 
 		func() {
 			// Ensures runMultipleConnections completes before the overall
@@ -956,11 +948,9 @@ func testRevert(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			runMultipleConnections(ctx, t)
-		}()
+		})
 
 		func() {
 			// Ensures runMultipleConnections completes before the overall
@@ -983,11 +973,9 @@ func testRevert(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			runMultipleConnections(ctx, t)
-		}()
+		})
 
 		// Ensures runMultipleConnections completes before the overall
 		// test does, even in the face of calls to t.FailNow() in the
@@ -1370,7 +1358,7 @@ func generateDelete(t *testing.T, conn *mysql.Conn) error {
 }
 
 func runSingleConnection(ctx context.Context, t *testing.T, done *int64) {
-	log.Infof("Running single connection")
+	log.Info("Running single connection")
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.Nil(t, err)
 	defer conn.Close()
@@ -1382,7 +1370,7 @@ func runSingleConnection(ctx context.Context, t *testing.T, done *int64) {
 
 	for {
 		if atomic.LoadInt64(done) == 1 {
-			log.Infof("Terminating single connection")
+			log.Info("Terminating single connection")
 			return
 		}
 		switch rand.Int32N(3) {
@@ -1399,30 +1387,28 @@ func runSingleConnection(ctx context.Context, t *testing.T, done *int64) {
 }
 
 func runMultipleConnections(ctx context.Context, t *testing.T) {
-	log.Infof("Running multiple connections")
+	log.Info("Running multiple connections")
 
 	require.True(t, checkTable(t, tableName, true))
 	var done int64
 	var wg sync.WaitGroup
-	for i := 0; i < maxConcurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range maxConcurrency {
+		wg.Go(func() {
 			runSingleConnection(ctx, t, &done)
-		}()
+		})
 	}
 	<-ctx.Done()
 	atomic.StoreInt64(&done, 1)
-	log.Infof("Running multiple connections: done")
+	log.Info("Running multiple connections: done")
 	wg.Wait()
-	log.Infof("All connections cancelled")
+	log.Info("All connections cancelled")
 }
 
 func initTable(t *testing.T) {
-	log.Infof("initTable begin")
-	defer log.Infof("initTable complete")
+	log.Info("initTable begin")
+	defer log.Info("initTable complete")
 
-	ctx := context.Background()
+	ctx := t.Context()
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.Nil(t, err)
 	defer conn.Close()
@@ -1431,13 +1417,13 @@ func initTable(t *testing.T) {
 	_, err = conn.ExecuteFetch(truncateStatement, 1000, true)
 	require.Nil(t, err)
 
-	for i := 0; i < maxTableRows/2; i++ {
+	for range maxTableRows / 2 {
 		generateInsert(t, conn)
 	}
-	for i := 0; i < maxTableRows/4; i++ {
+	for range maxTableRows / 4 {
 		generateUpdate(t, conn)
 	}
-	for i := 0; i < maxTableRows/4; i++ {
+	for range maxTableRows / 4 {
 		generateDelete(t, conn)
 	}
 }
@@ -1446,9 +1432,9 @@ func testSelectTableMetrics(t *testing.T) {
 	writeMetrics.mu.Lock()
 	defer writeMetrics.mu.Unlock()
 
-	log.Infof("%s", writeMetrics.String())
+	log.Info(writeMetrics.String())
 
-	ctx := context.Background()
+	ctx := t.Context()
 	conn, err := mysql.Connect(ctx, &vtParams)
 	require.NoError(t, err)
 	defer conn.Close()
@@ -1458,7 +1444,7 @@ func testSelectTableMetrics(t *testing.T) {
 
 	row := rs.Named().Row()
 	require.NotNil(t, row)
-	log.Infof("testSelectTableMetrics, row: %v", row)
+	log.Info(fmt.Sprintf("testSelectTableMetrics, row: %v", row))
 	numRows := row.AsInt64("num_rows", 0)
 	sumUpdates := row.AsInt64("sum_updates", 0)
 

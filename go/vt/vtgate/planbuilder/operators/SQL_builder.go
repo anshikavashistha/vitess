@@ -21,6 +21,8 @@ import (
 	"slices"
 	"sort"
 
+	"vitess.io/vitess/go/vt/vtgate/planbuilder/operators/predicates"
+
 	"vitess.io/vitess/go/slice"
 	"vitess.io/vitess/go/vt/sqlparser"
 	"vitess.io/vitess/go/vt/vterrors"
@@ -39,8 +41,8 @@ type (
 
 func (qb *queryBuilder) asSelectStatement() sqlparser.TableStatement {
 	return qb.stmt.(sqlparser.TableStatement)
-
 }
+
 func (qb *queryBuilder) asOrderAndLimit() sqlparser.OrderAndLimit {
 	return qb.stmt.(sqlparser.OrderAndLimit)
 }
@@ -53,6 +55,7 @@ func ToSQL(ctx *plancontext.PlanningContext, op Operator) (_ sqlparser.Statement
 	if ctx.SemTable != nil {
 		q.sortTables()
 	}
+	sqlparser.RemoveKeyspaceIgnoreSysSchema(q.stmt)
 	return q.stmt, q.dmlOperator, nil
 }
 
@@ -116,9 +119,12 @@ func (qb *queryBuilder) addTableExpr(
 }
 
 func (qb *queryBuilder) addPredicate(expr sqlparser.Expr) {
-	if qb.ctx.ShouldSkip(expr) {
-		// This is a predicate that was added to the RHS of an ApplyJoin.
-		// The original predicate will be added, so we don't have to add this here
+	if jp, ok := expr.(*predicates.JoinPredicate); ok {
+		// we have to strip out the join predicate containers,
+		// otherwise precedence calculations get messed up
+		expr = jp.Current()
+	}
+	if expr == nil {
 		return
 	}
 
@@ -274,9 +280,11 @@ type FromStatement interface {
 	SetWherePredicate(sqlparser.Expr)
 }
 
-var _ FromStatement = (*sqlparser.Select)(nil)
-var _ FromStatement = (*sqlparser.Update)(nil)
-var _ FromStatement = (*sqlparser.Delete)(nil)
+var (
+	_ FromStatement = (*sqlparser.Select)(nil)
+	_ FromStatement = (*sqlparser.Update)(nil)
+	_ FromStatement = (*sqlparser.Delete)(nil)
+)
 
 func (qb *queryBuilder) joinWith(other *queryBuilder, onCondition sqlparser.Expr, joinType sqlparser.JoinType) {
 	stmt := qb.stmt.(FromStatement)
@@ -356,7 +364,6 @@ func (qb *queryBuilder) sortTables() {
 		sort.Sort(ts)
 		return true, nil
 	}, qb.stmt)
-
 }
 
 type tableSorter struct {
@@ -390,15 +397,6 @@ func (ts *tableSorter) Swap(i, j int) {
 	ts.sel.From[i], ts.sel.From[j] = ts.sel.From[j], ts.sel.From[i]
 }
 
-func removeKeyspaceFromSelectExpr(expr sqlparser.SelectExpr) {
-	switch expr := expr.(type) {
-	case *sqlparser.AliasedExpr:
-		sqlparser.RemoveKeyspaceInCol(expr.Expr)
-	case *sqlparser.StarExpr:
-		expr.TableName.Qualifier = sqlparser.NewIdentifierCS("")
-	}
-}
-
 func stripDownQuery(from, to sqlparser.TableStatement) {
 	switch node := from.(type) {
 	case *sqlparser.Select:
@@ -413,9 +411,6 @@ func stripDownQuery(from, to sqlparser.TableStatement) {
 		toNode.Comments = node.Comments
 		toNode.Limit = node.Limit
 		toNode.SelectExprs = node.SelectExprs
-		for _, expr := range toNode.SelectExprs.Exprs {
-			removeKeyspaceFromSelectExpr(expr)
-		}
 	case *sqlparser.Union:
 		toNode, ok := to.(*sqlparser.Union)
 		if !ok {
@@ -424,6 +419,7 @@ func stripDownQuery(from, to sqlparser.TableStatement) {
 		stripDownQuery(node.Left, toNode.Left)
 		stripDownQuery(node.Right, toNode.Right)
 		toNode.OrderBy = node.OrderBy
+		toNode.Limit = node.Limit
 	default:
 		panic(vterrors.VT13001(fmt.Sprintf("this should not happen - we have covered all implementations of SelectStatement %T", from)))
 	}
@@ -609,15 +605,13 @@ func buildProjection(op *Projection, qb *queryBuilder) {
 }
 
 func buildApplyJoin(op *ApplyJoin, qb *queryBuilder) {
-	predicates := slice.Map(op.JoinPredicates.columns, func(jc applyJoinColumn) sqlparser.Expr {
-		// since we are adding these join predicates, we need to mark to broken up version (RHSExpr) of it as done
-		err := qb.ctx.SkipJoinPredicates(jc.Original)
-		if err != nil {
-			panic(err)
+	preds := slice.Map(op.JoinPredicates.columns, func(jc applyJoinColumn) sqlparser.Expr {
+		if jc.JoinPredicateID != nil {
+			qb.ctx.PredTracker.Skip(*jc.JoinPredicateID)
 		}
 		return jc.Original
 	})
-	pred := sqlparser.AndExpressions(predicates...)
+	pred := sqlparser.AndExpressions(preds...)
 
 	buildQuery(op.LHS, qb)
 
@@ -661,8 +655,6 @@ func buildFilter(op *Filter, qb *queryBuilder) {
 
 func buildDerived(op *Horizon, qb *queryBuilder) {
 	buildQuery(op.Source, qb)
-
-	sqlparser.RemoveKeyspaceInCol(op.Query)
 
 	stmt := qb.stmt
 	qb.stmt = nil
@@ -714,23 +706,12 @@ func buildDerivedSelect(op *Horizon, qb *queryBuilder, sel *sqlparser.Select) {
 func buildHorizon(op *Horizon, qb *queryBuilder) {
 	buildQuery(op.Source, qb)
 	stripDownQuery(op.Query, qb.asSelectStatement())
-	sqlparser.RemoveKeyspaceInCol(qb.stmt)
 }
 
 func buildRecursiveCTE(op *RecurseCTE, qb *queryBuilder) {
-	predicates := slice.Map(op.Predicates, func(jc *plancontext.RecurseExpression) sqlparser.Expr {
-		// since we are adding these join predicates, we need to mark to broken up version (RHSExpr) of it as done
-		err := qb.ctx.SkipJoinPredicates(jc.Original)
-		if err != nil {
-			panic(err)
-		}
-		return jc.Original
-	})
-	pred := sqlparser.AndExpressions(predicates...)
 	buildQuery(op.Seed(), qb)
 	qbR := &queryBuilder{ctx: qb.ctx}
 	buildQuery(op.Term(), qbR)
-	qbR.addPredicate(pred)
 	infoFor, err := qb.ctx.SemTable.TableInfoFor(op.OuterID)
 	if err != nil {
 		panic(err)

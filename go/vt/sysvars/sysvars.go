@@ -73,6 +73,7 @@ var (
 	TxReadOnly                  = SystemVariable{Name: "tx_read_only", IsBoolean: true, Default: off}
 	Workload                    = SystemVariable{Name: "workload", IdentifierAsString: true}
 	QueryTimeout                = SystemVariable{Name: "query_timeout"}
+	TransactionTimeout          = SystemVariable{Name: "transaction_timeout"}
 
 	// Online DDL
 	DDLStrategy      = SystemVariable{Name: "ddl_strategy", IdentifierAsString: true}
@@ -86,6 +87,9 @@ var (
 	ReadAfterWriteGTID    = SystemVariable{Name: "read_after_write_gtid"}
 	ReadAfterWriteTimeOut = SystemVariable{Name: "read_after_write_timeout"}
 	SessionTrackGTIDs     = SystemVariable{Name: "session_track_gtids", IdentifierAsString: true}
+
+	// Filled in from VitessAware, ReadOnly, IgnoreThese, NotSupported, UseReservedConn, CheckAndIgnore
+	AllSystemVariables map[string]SystemVariable
 
 	VitessAware = []SystemVariable{
 		Autocommit,
@@ -106,6 +110,7 @@ var (
 		ReadAfterWriteTimeOut,
 		SessionTrackGTIDs,
 		QueryTimeout,
+		TransactionTimeout,
 	}
 
 	ReadOnly = []SystemVariable{
@@ -269,6 +274,31 @@ var (
 	}
 )
 
+func init() {
+	AllSystemVariables = make(map[string]SystemVariable)
+	for _, set := range [][]SystemVariable{
+		VitessAware,
+		ReadOnly,
+		IgnoreThese,
+		NotSupported,
+		UseReservedConn,
+		CheckAndIgnore,
+	} {
+		for _, v := range set {
+			AllSystemVariables[v.Name] = v
+		}
+	}
+}
+
+func SupportsSetVar(name string) bool {
+	sys, ok := AllSystemVariables[name]
+	if !ok {
+		return false
+	}
+
+	return sys.SupportSetVar
+}
+
 // GetInterestingVariables is used to return all the variables that may be listed in a SHOW VARIABLES command.
 func GetInterestingVariables() []string {
 	var res []string
@@ -289,8 +319,10 @@ func GetInterestingVariables() []string {
 	return res
 }
 
-var vitessAwareVariableNames map[string]struct{}
-var vitessAwareInit sync.Once
+var (
+	vitessAwareVariableNames map[string]struct{}
+	vitessAwareInit          sync.Once
+)
 
 func IsVitessAware(sysv string) bool {
 	vitessAwareInit.Do(func() {

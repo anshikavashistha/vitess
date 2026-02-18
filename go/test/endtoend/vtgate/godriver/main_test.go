@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"vitess.io/vitess/go/vt/log"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vitessdriver"
 
 	"vitess.io/vitess/go/test/endtoend/cluster"
@@ -106,15 +107,17 @@ func TestMain(m *testing.M) {
 		clusterInstance.VtTabletExtraArgs = []string{
 			"--queryserver-config-transaction-timeout", "3s",
 		}
-		if err := clusterInstance.StartKeyspace(*Keyspace, []string{"-80", "80-"}, 1, false); err != nil {
-			log.Fatal(err.Error())
+		if err := clusterInstance.StartKeyspace(*Keyspace, []string{"-80", "80-"}, 1, false, clusterInstance.Cell); err != nil {
+			log.Error(err.Error())
+			os.Exit(1)
 			return 1
 		}
 
 		// Start vtgate
-		clusterInstance.VtGateExtraArgs = []string{"--warn_sharded_only=true"}
+		clusterInstance.VtGateExtraArgs = []string{utils.GetFlagVariantForTests("--warn-sharded-only") + "=true"}
 		if err := clusterInstance.StartVtgate(); err != nil {
-			log.Fatal(err.Error())
+			log.Error(err.Error())
+			os.Exit(1)
 			return 1
 		}
 
@@ -124,7 +127,6 @@ func TestMain(m *testing.M) {
 }
 
 func TestStreamMessaging(t *testing.T) {
-
 	cnf := vitessdriver.Configuration{
 		Protocol: "grpc",
 		Address:  clusterInstance.Hostname + ":" + strconv.Itoa(clusterInstance.VtgateGrpcPort),

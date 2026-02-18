@@ -19,6 +19,7 @@ package stress
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path"
 	"strconv"
@@ -29,7 +30,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"golang.org/x/exp/rand"
 
 	"vitess.io/vitess/go/mysql"
 	"vitess.io/vitess/go/syscallutil"
@@ -42,14 +42,12 @@ import (
 	"vitess.io/vitess/go/vt/schema"
 )
 
-var (
-	// idVals are the primary key values to use while creating insert queries that ensures all the three shards get an insert.
-	idVals = [3]int{
-		4, // 4 maps to 0x20 and ends up in the first shard (-40)
-		6, // 6 maps to 0x60 and ends up in the second shard (40-80)
-		9, // 9 maps to 0x90 and ends up in the third shard (80-)
-	}
-)
+// idVals are the primary key values to use while creating insert queries that ensures all the three shards get an insert.
+var idVals = [3]int{
+	4, // 4 maps to 0x20 and ends up in the first shard (-40)
+	6, // 6 maps to 0x60 and ends up in the second shard (40-80)
+	9, // 9 maps to 0x90 and ends up in the third shard (80-)
+}
 
 func TestSettings(t *testing.T) {
 	testcases := []struct {
@@ -74,7 +72,7 @@ func TestSettings(t *testing.T) {
 				"insert into twopc_settings(id, col) values(9, now())"),
 			verifyFunc: func(t *testing.T, vtParams *mysql.ConnParams) {
 				// We can check that the time_zone setting was taken into account by checking the diff with the time by using a different time_zone.
-				ctx := context.Background()
+				ctx := t.Context()
 				conn, err := mysql.Connect(ctx, vtParams)
 				require.NoError(t, err)
 				defer conn.Close()
@@ -91,7 +89,7 @@ func TestSettings(t *testing.T) {
 				"insert into twopc_settings(id, col) values(9, now())"),
 			verifyFunc: func(t *testing.T, vtParams *mysql.ConnParams) {
 				// We can check that the time_zone setting was taken into account by checking the diff with the time by using a different time_zone.
-				ctx := context.Background()
+				ctx := t.Context()
 				conn, err := mysql.Connect(ctx, vtParams)
 				require.NoError(t, err)
 				defer conn.Close()
@@ -109,7 +107,7 @@ func TestSettings(t *testing.T) {
 				"insert into twopc_settings(id, col) values(25, now())"),
 			verifyFunc: func(t *testing.T, vtParams *mysql.ConnParams) {
 				// We can check that the time_zone setting was taken into account by checking the diff with the time by using a different time_zone.
-				ctx := context.Background()
+				ctx := t.Context()
 				conn, err := mysql.Connect(ctx, vtParams)
 				require.NoError(t, err)
 				defer conn.Close()
@@ -142,7 +140,6 @@ func TestSettings(t *testing.T) {
 			tt.verifyFunc(t, &vtParams)
 		})
 	}
-
 }
 
 // TestDisruptions tests that atomic transactions persevere through various disruptions.
@@ -225,12 +222,10 @@ func TestDisruptions(t *testing.T) {
 			var writerWg sync.WaitGroup
 			// Run multiple threads to try to write to the database on the same values of id to ensure that we don't
 			// allow any writes while the transaction is prepared and not committed.
-			for i := 0; i < 10; i++ {
-				writerWg.Add(1)
-				go func() {
-					defer writerWg.Done()
+			for i := range 10 {
+				writerWg.Go(func() {
 					threadToWrite(t, writeCtx, idVals[i%3])
-				}()
+				})
 			}
 			// Run the disruption.
 			err := tt.disruption(t)
@@ -290,7 +285,7 @@ func threadToWrite(t *testing.T, ctx context.Context, id int) {
 		if err != nil {
 			continue
 		}
-		_, _ = utils.ExecAllowError(t, conn, fmt.Sprintf("insert into twopc_t1(id, col) values(%d, %d)", id, rand.Intn(10000)))
+		_, _ = utils.ExecAllowError(t, conn, fmt.Sprintf("insert into twopc_t1(id, col) values(%d, %d)", id, rand.IntN(10000)))
 		conn.Close()
 	}
 }
@@ -338,7 +333,7 @@ func mysqlRestartShard3(t *testing.T) error {
 	shard := clusterInstance.Keyspaces[0].Shards[2]
 	vttablets := shard.Vttablets
 	tablet := vttablets[0]
-	log.Errorf("Restarting MySQL for - %v/%v tablet - %v", keyspaceName, shard.Name, tablet.Alias)
+	log.Error(fmt.Sprintf("Restarting MySQL for - %v/%v tablet - %v", keyspaceName, shard.Name, tablet.Alias))
 	pidFile := path.Join(os.Getenv("VTDATAROOT"), fmt.Sprintf("/vt_%010d/mysql.pid", tablet.TabletUID))
 	pidBytes, err := os.ReadFile(pidFile)
 	if err != nil {

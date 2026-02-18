@@ -22,25 +22,22 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"vitess.io/vitess/go/mysql/sqlerror"
-
 	"vitess.io/vitess/go/mysql"
+	"vitess.io/vitess/go/mysql/sqlerror"
 	vtenv "vitess.io/vitess/go/vt/env"
 	"vitess.io/vitess/go/vt/mysqlctl"
+	vttestpb "vitess.io/vitess/go/vt/proto/vttest"
 	"vitess.io/vitess/go/vt/tlstest"
 	"vitess.io/vitess/go/vt/vttest"
-
-	vttestpb "vitess.io/vitess/go/vt/proto/vttest"
 )
 
-var (
-	connParams mysql.ConnParams
-)
+var connParams mysql.ConnParams
 
 // assertSQLError makes sure we get the right error.
 func assertSQLError(t *testing.T, err error, code sqlerror.ErrorCode, sqlState string, subtext string, query string) {
@@ -53,7 +50,6 @@ func assertSQLError(t *testing.T, err error, code sqlerror.ErrorCode, sqlState s
 	require.Equal(t, sqlState, serr.State, "was expecting SQLError %v / %v / %v but got state %v", code, sqlState, subtext, serr.State)
 	require.True(t, subtext == "" || strings.Contains(serr.Message, subtext), "was expecting SQLError %v / %v / %v but got message %v", code, sqlState, subtext, serr.Message)
 	require.Equal(t, query, serr.Query, "was expecting SQLError %v / %v / %v with Query '%v' but got query '%v'", code, sqlState, subtext, query, serr.Query)
-
 }
 
 // runMysql forks a mysql command line process connecting to the provided server.
@@ -88,7 +84,7 @@ func runMysql(t *testing.T, params *mysql.ConnParams, command string) (string, b
 	} else {
 		args = append(args,
 			"-h", params.Host,
-			"-P", fmt.Sprintf("%v", params.Port))
+			"-P", strconv.Itoa(params.Port))
 	}
 	if params.Uname != "" {
 		args = append(args, "-u", params.Uname)

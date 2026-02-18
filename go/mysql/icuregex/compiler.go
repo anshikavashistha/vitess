@@ -36,8 +36,10 @@ import (
 	"vitess.io/vitess/go/mysql/icuregex/internal/utf16"
 )
 
-const BreakIteration = false
-const stackSize = 100
+const (
+	BreakIteration = false
+	stackSize      = 100
+)
 
 type reChar struct {
 	char   rune
@@ -186,10 +188,7 @@ func (c *compiler) nextChar(ch *reChar) {
 			// We are in free-spacing and comments mode.
 			//  Scan through any white space and comments, until we
 			//  reach a significant character or the end of input.
-			for {
-				if ch.char == -1 {
-					break // End of Input
-				}
+			for ch.char != -1 {
 				if ch.char == chPound && c.eolComments {
 					// Start of a comment.  Consume the rest of it, until EOF or a new line
 					for {
@@ -333,11 +332,7 @@ func (c *compiler) compile(pat []rune) error {
 	//      - pushing or popping a state to/from the local state return stack.
 	//   file regexcst.txt is the source for the state table.  The logic behind
 	//     recongizing the pattern syntax is there, not here.
-	for {
-		if c.err != nil {
-			break
-		}
-
+	for c.err == nil {
 		if state == 0 {
 			panic("bad state?")
 		}
@@ -411,12 +406,12 @@ func (c *compiler) doParseActions(action patternParseAction) bool {
 	switch action {
 	case doPatStart:
 		// Start of pattern compiles to:
-		//0   SAVE   2        Fall back to position of FAIL
-		//1   jmp    3
-		//2   FAIL            Stop if we ever reach here.
-		//3   NOP             Dummy, so start of pattern looks the same as
+		// 0   SAVE   2        Fall back to position of FAIL
+		// 1   jmp    3
+		// 2   FAIL            Stop if we ever reach here.
+		// 3   NOP             Dummy, so start of pattern looks the same as
 		//                    the start of an ( grouping.
-		//4   NOP             Resreved, will be replaced by a save if there are
+		// 4   NOP             Resreved, will be replaced by a save if there are
 		//                    OR | operators at the top level
 		c.appendOp(urxStateSave, 2)
 		c.appendOp(urxJmp, 3)
@@ -1855,7 +1850,7 @@ func (c *compiler) matchStartType() {
 	var loc int               // Location in the pattern of the current op being processed.
 	var currentLen int32      // Minimum length of a match to this point (loc) in the pattern
 	var numInitialStrings int // Number of strings encountered that could match at start.
-	var atStart = true        // True if no part of the pattern yet encountered
+	atStart := true           // True if no part of the pattern yet encountered
 	//   could have advanced the position in a match.
 	//   (Maximum match length so far == 0)
 
@@ -2081,8 +2076,7 @@ func (c *compiler) matchStartType() {
 			}
 			atStart = false
 
-		case urxJmpSav,
-			urxJmpSavX:
+		case urxJmpSav, urxJmpSavX:
 			// Combo of state save to the next loc, + jmp backwards.
 			//   Net effect on min. length computation is nothing.
 			atStart = false
@@ -2145,8 +2139,7 @@ func (c *compiler) matchStartType() {
 			currentLen = safeIncrement(currentLen, stringLen)
 			atStart = false
 
-		case urxCtrInit,
-			urxCtrInitNg:
+		case urxCtrInit, urxCtrInitNg:
 			// Loop Init Ops.  These don't change the min length, but they are 4 word ops
 			//   so location must be updated accordingly.
 			// Loop Init Ops.
@@ -2167,8 +2160,7 @@ func (c *compiler) matchStartType() {
 			loc += 3 // Skips over operands of CTR_INIT
 			atStart = false
 
-		case utxCtrLoop,
-			urxCtrLoopNg:
+		case utxCtrLoop, urxCtrLoopNg:
 			// Loop ops.
 			//  The jump is conditional, backwards only.
 			atStart = false
@@ -2178,8 +2170,7 @@ func (c *compiler) matchStartType() {
 			//   don't change the minimum match
 			atStart = false
 
-		case urxLaStart,
-			urxLbStart:
+		case urxLaStart, urxLbStart:
 			// Look-around.  Scan forward until the matching look-ahead end,
 			//   without processing the look-around block.  This is overly pessimistic.
 
@@ -2285,7 +2276,7 @@ func (c *compiler) buildOp(typ opcode, val int) instruction {
 		panic("bad argument to buildOp")
 	}
 	if val < 0 {
-		if !(typ == urxReservedOpN || typ == urxReservedOp) {
+		if typ != urxReservedOpN && typ != urxReservedOp {
 			panic("bad value to buildOp")
 		}
 		typ = urxReservedOpN
@@ -3252,18 +3243,21 @@ var reCaseFixCodePoints = [...]rune{
 	0x3ac, 0x3ae, 0x3b1, 0x3b7, 0x3b9, 0x3c1, 0x3c5, 0x3c9, 0x3ce, 0x565,
 	0x574, 0x57e, 0x1f00, 0x1f01, 0x1f02, 0x1f03, 0x1f04, 0x1f05, 0x1f06, 0x1f07,
 	0x1f20, 0x1f21, 0x1f22, 0x1f23, 0x1f24, 0x1f25, 0x1f26, 0x1f27, 0x1f60, 0x1f61,
-	0x1f62, 0x1f63, 0x1f64, 0x1f65, 0x1f66, 0x1f67, 0x1f70, 0x1f74, 0x1f7c, 0x110000}
+	0x1f62, 0x1f63, 0x1f64, 0x1f65, 0x1f66, 0x1f67, 0x1f70, 0x1f74, 0x1f7c, 0x110000,
+}
 
 var reCaseFixStringOffsets = [...]int16{
 	0x0, 0x1, 0x6, 0x7, 0x8, 0x9, 0xd, 0xe, 0xf, 0x10, 0x11, 0x12, 0x13,
 	0x17, 0x1b, 0x20, 0x21, 0x2a, 0x2e, 0x2f, 0x30, 0x34, 0x35, 0x37, 0x39, 0x3b,
 	0x3d, 0x3f, 0x41, 0x43, 0x45, 0x47, 0x49, 0x4b, 0x4d, 0x4f, 0x51, 0x53, 0x55,
-	0x57, 0x59, 0x5b, 0x5d, 0x5f, 0x61, 0x63, 0x65, 0x66, 0x67, 0}
+	0x57, 0x59, 0x5b, 0x5d, 0x5f, 0x61, 0x63, 0x65, 0x66, 0x67, 0,
+}
 
 var reCaseFixCounts = [...]int16{
 	0x1, 0x5, 0x1, 0x1, 0x1, 0x4, 0x1, 0x1, 0x1, 0x1, 0x1, 0x1, 0x4, 0x4, 0x5, 0x1, 0x9,
 	0x4, 0x1, 0x1, 0x4, 0x1, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2,
-	0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x1, 0x1, 0x1, 0}
+	0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x2, 0x1, 0x1, 0x1, 0,
+}
 
 var reCaseFixData = [...]uint16{
 	0x1e9a, 0xfb00, 0xfb01, 0xfb02, 0xfb03, 0xfb04, 0x1e96, 0x130, 0x1f0, 0xdf, 0x1e9e, 0xfb05,
@@ -3274,7 +3268,8 @@ var reCaseFixData = [...]uint16{
 	0x1f8b, 0x1f84, 0x1f8c, 0x1f85, 0x1f8d, 0x1f86, 0x1f8e, 0x1f87, 0x1f8f, 0x1f90, 0x1f98, 0x1f91,
 	0x1f99, 0x1f92, 0x1f9a, 0x1f93, 0x1f9b, 0x1f94, 0x1f9c, 0x1f95, 0x1f9d, 0x1f96, 0x1f9e, 0x1f97,
 	0x1f9f, 0x1fa0, 0x1fa8, 0x1fa1, 0x1fa9, 0x1fa2, 0x1faa, 0x1fa3, 0x1fab, 0x1fa4, 0x1fac, 0x1fa5,
-	0x1fad, 0x1fa6, 0x1fae, 0x1fa7, 0x1faf, 0x1fb2, 0x1fc2, 0x1ff2, 0}
+	0x1fad, 0x1fa6, 0x1fae, 0x1fa7, 0x1faf, 0x1fb2, 0x1fc2, 0x1ff2, 0,
+}
 
 func (c *compiler) findCaseInsensitiveStarters(ch rune, starterChars *uset.UnicodeSet) {
 	if uprops.HasBinaryProperty(ch, uprops.UCharCaseSensitive) {
@@ -3290,7 +3285,7 @@ func (c *compiler) findCaseInsensitiveStarters(ch rune, starterChars *uset.Unico
 		if reCaseFixCodePoints[i] == ch {
 			data := reCaseFixData[reCaseFixStringOffsets[i]:]
 			numCharsToAdd := reCaseFixCounts[i]
-			for j := int16(0); j < numCharsToAdd; j++ {
+			for range numCharsToAdd {
 				var cpToAdd rune
 				cpToAdd, data = utf16.NextUnsafe(data)
 				starterChars.AddRune(cpToAdd)
@@ -3412,17 +3407,18 @@ func (c *compiler) createSetForProperty(propName string, negated bool) *uset.Uni
 		//  Try the various Java specific properties.
 		//   These all begin with "java"
 		//
-		if propName == "javaDefined" {
+		switch propName {
+		case "javaDefined":
 			c.err = uprops.AddCategory(set, uchar.GcCnMask)
 			set.Complement()
-		} else if propName == "javaDigit" {
+		case "javaDigit":
 			c.err = uprops.AddCategory(set, uchar.GcNdMask)
-		} else if propName == "javaIdentifierIgnorable" {
+		case "javaIdentifierIgnorable":
 			c.err = addIdentifierIgnorable(set)
-		} else if propName == "javaISOControl" {
+		case "javaISOControl":
 			set.AddRuneRange(0, 0x1F)
 			set.AddRuneRange(0x7F, 0x9F)
-		} else if propName == "javaJavaIdentifierPart" {
+		case "javaJavaIdentifierPart":
 			c.err = uprops.AddCategory(set, uchar.GcLMask)
 			if c.err == nil {
 				c.err = uprops.AddCategory(set, uchar.GcScMask)
@@ -3445,7 +3441,7 @@ func (c *compiler) createSetForProperty(propName string, negated bool) *uset.Uni
 			if c.err == nil {
 				c.err = addIdentifierIgnorable(set)
 			}
-		} else if propName == "javaJavaIdentifierStart" {
+		case "javaJavaIdentifierStart":
 			c.err = uprops.AddCategory(set, uchar.GcLMask)
 			if c.err == nil {
 				c.err = uprops.AddCategory(set, uchar.GcNlMask)
@@ -3456,29 +3452,29 @@ func (c *compiler) createSetForProperty(propName string, negated bool) *uset.Uni
 			if c.err == nil {
 				c.err = uprops.AddCategory(set, uchar.GcPcMask)
 			}
-		} else if propName == "javaLetter" {
+		case "javaLetter":
 			c.err = uprops.AddCategory(set, uchar.GcLMask)
-		} else if propName == "javaLetterOrDigit" {
+		case "javaLetterOrDigit":
 			c.err = uprops.AddCategory(set, uchar.GcLMask)
 			if c.err == nil {
 				c.err = uprops.AddCategory(set, uchar.GcNdMask)
 			}
-		} else if propName == "javaLowerCase" {
+		case "javaLowerCase":
 			c.err = uprops.AddCategory(set, uchar.GcLlMask)
-		} else if propName == "javaMirrored" {
+		case "javaMirrored":
 			c.err = uprops.ApplyIntPropertyValue(set, uprops.UCharBidiMirrored, 1)
-		} else if propName == "javaSpaceChar" {
+		case "javaSpaceChar":
 			c.err = uprops.AddCategory(set, uchar.GcZMask)
-		} else if propName == "javaSupplementaryCodePoint" {
+		case "javaSupplementaryCodePoint":
 			set.AddRuneRange(0x10000, uset.MaxValue)
-		} else if propName == "javaTitleCase" {
+		case "javaTitleCase":
 			c.err = uprops.AddCategory(set, uchar.GcLtMask)
-		} else if propName == "javaUnicodeIdentifierStart" {
+		case "javaUnicodeIdentifierStart":
 			c.err = uprops.AddCategory(set, uchar.GcLMask)
 			if c.err == nil {
 				c.err = uprops.AddCategory(set, uchar.GcNlMask)
 			}
-		} else if propName == "javaUnicodeIdentifierPart" {
+		case "javaUnicodeIdentifierPart":
 			c.err = uprops.AddCategory(set, uchar.GcLMask)
 			if c.err == nil {
 				c.err = uprops.AddCategory(set, uchar.GcPcMask)
@@ -3498,11 +3494,11 @@ func (c *compiler) createSetForProperty(propName string, negated bool) *uset.Uni
 			if c.err == nil {
 				c.err = addIdentifierIgnorable(set)
 			}
-		} else if propName == "javaUpperCase" {
+		case "javaUpperCase":
 			c.err = uprops.AddCategory(set, uchar.GcLuMask)
-		} else if propName == "javaValidCodePoint" {
+		case "javaValidCodePoint":
 			set.AddRuneRange(0, uset.MaxValue)
-		} else if propName == "javaWhitespace" {
+		case "javaWhitespace":
 			c.err = uprops.AddCategory(set, uchar.GcZMask)
 			excl := uset.New()
 			excl.AddRune(0x0a)
@@ -3511,7 +3507,7 @@ func (c *compiler) createSetForProperty(propName string, negated bool) *uset.Uni
 			set.RemoveAll(excl)
 			set.AddRuneRange(9, 0x0d)
 			set.AddRuneRange(0x1c, 0x1f)
-		} else {
+		default:
 			c.error(PropertySyntax)
 		}
 
@@ -3546,7 +3542,7 @@ func addIdentifierIgnorable(set *uset.UnicodeSet) error {
 func (c *compiler) scanPosixProp() *uset.UnicodeSet {
 	var set *uset.UnicodeSet
 
-	if !(c.c.char == chColon) {
+	if c.c.char != chColon {
 		panic("assertion failed: c.lastChar == ':'")
 	}
 

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/user"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"vitess.io/vitess/go/vt/log"
 	"vitess.io/vitess/go/vt/proto/vtrpc"
 	"vitess.io/vitess/go/vt/servenv"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vterrors"
 )
 
@@ -73,7 +75,7 @@ func init() {
 }
 
 func registerTopoLockFlags(fs *pflag.FlagSet) {
-	fs.DurationVar(&RemoteOperationTimeout, "remote_operation_timeout", RemoteOperationTimeout, "time to wait for a remote operation")
+	utils.SetFlagDurationVar(fs, &RemoteOperationTimeout, "remote-operation-timeout", RemoteOperationTimeout, "time to wait for a remote operation")
 	fs.DurationVar(&LockTimeout, "lock-timeout", LockTimeout, "Maximum time to wait when attempting to acquire a lock from the topo server")
 }
 
@@ -162,7 +164,7 @@ func (l *Lock) lock(ctx context.Context, ts *Server, lt iTopoLock, opts ...LockO
 	for _, o := range opts {
 		o.apply(&l.Options)
 	}
-	log.Infof("Locking %s %s for action %s with options: %+v", lt.Type(), lt.ResourceName(), l.Action, l.Options)
+	log.Info(fmt.Sprintf("Locking %s %s for action %s with options: %+v", lt.Type(), lt.ResourceName(), l.Action, l.Options))
 
 	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
 	defer cancel()
@@ -211,10 +213,10 @@ func (l *Lock) unlock(ctx context.Context, lt iTopoLock, lockDescriptor LockDesc
 
 	// first update the actionNode
 	if actionError != nil {
-		log.Infof("Unlocking %v %v for action %v with error %v", lt.Type(), lt.ResourceName(), l.Action, actionError)
+		log.Info(fmt.Sprintf("Unlocking %v %v for action %v with error %v", lt.Type(), lt.ResourceName(), l.Action, actionError))
 		l.Status = "Error: " + actionError.Error()
 	} else {
-		log.Infof("Unlocking %v %v for successful action %v", lt.Type(), lt.ResourceName(), l.Action)
+		log.Info(fmt.Sprintf("Unlocking %v %v for successful action %v", lt.Type(), lt.ResourceName(), l.Action))
 		l.Status = "Done"
 	}
 	return lockDescriptor.Unlock(ctx)
@@ -252,7 +254,7 @@ func (ts *Server) internalLock(ctx context.Context, lt iTopoLock, action string,
 
 		if _, ok := i.info[lt.ResourceName()]; !ok {
 			if *finalErr != nil {
-				log.Errorf("trying to unlock %v %v multiple times", lt.Type(), lt.ResourceName())
+				log.Error(fmt.Sprintf("trying to unlock %v %v multiple times", lt.Type(), lt.ResourceName()))
 			} else {
 				*finalErr = vterrors.Errorf(vtrpc.Code_INTERNAL, "trying to unlock %v %v multiple times", lt.Type(), lt.ResourceName())
 			}
@@ -264,7 +266,7 @@ func (ts *Server) internalLock(ctx context.Context, lt iTopoLock, action string,
 		if *finalErr != nil {
 			if err != nil {
 				// both error are set, just log the unlock error
-				log.Warningf("unlock %v %v failed: %v", lt.Type(), lt.ResourceName(), err)
+				log.Warn(fmt.Sprintf("unlock %v %v failed: %v", lt.Type(), lt.ResourceName(), err))
 			}
 		} else {
 			*finalErr = err
@@ -324,8 +326,8 @@ func newFuncLockOption(f func(*lockOptions)) *funcLockOption {
 // WithTTL allows you to specify how long the underlying topo server
 // implementation should hold the lock before releasing it — even if the caller
 // has not explicitly released it. This provides a way to override the global
-// ttl values that are set via --topo_consul_lock_session_ttl and
-// --topo_etcd_lease_ttl.
+// ttl values that are set via --topo-consul-lock-session-ttl and
+// --topo-etcd-lease-ttl.
 // Note: This option is ignored by the ZooKeeper implementation as it does not
 // support TTLs.
 func WithTTL(ttl time.Duration) LockOption {

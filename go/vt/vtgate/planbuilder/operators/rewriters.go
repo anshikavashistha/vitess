@@ -50,9 +50,7 @@ type (
 	VisitRule bool
 )
 
-var (
-	NoRewrite *ApplyResult = nil
-)
+var NoRewrite *ApplyResult = nil
 
 const (
 	VisitChildren VisitRule = true
@@ -64,6 +62,12 @@ func Rewrote(message string) *ApplyResult {
 		fmt.Println(">>>>>>>> " + message)
 	}
 	return &ApplyResult{Transformations: []Rewrite{{Message: message}}}
+}
+
+func debugNoRewrite(reason string, args ...any) {
+	if DebugOperatorTree {
+		fmt.Printf("NoRewrite: "+reason+"\n", args...)
+	}
 }
 
 func (ar *ApplyResult) Merge(other *ApplyResult) *ApplyResult {
@@ -336,6 +340,13 @@ func topDown(
 
 	if !shouldVisit(root) {
 		return newOp, anythingChanged
+	}
+
+	// If the rewriter replaced the operator with a different one, we need to re-visit
+	// the new operator to give it a chance to be processed
+	if anythingChanged.Changed() && newOp != root {
+		revisitedOp, revisitChanged := topDown(newOp, rootID, resolveID, rewriter, shouldVisit, isRoot)
+		return revisitedOp, anythingChanged.Merge(revisitChanged)
 	}
 
 	if anythingChanged.Changed() {

@@ -45,7 +45,7 @@ func (fk *fkContraint) FkWalk(node sqlparser.SQLNode) (kontinue bool, err error)
 // This is why we return a compound primitive (DDL) which contains fully populated primitives (Send & OnlineDDL),
 // and which chooses which of the two to invoke at runtime.
 func buildGeneralDDLPlan(ctx context.Context, sql string, ddlStatement sqlparser.DDLStatement, reservedVars *sqlparser.ReservedVars, vschema plancontext.VSchema, cfg dynamicconfig.DDL) (*planResult, error) {
-	if vschema.Destination() != nil {
+	if vschema.ShardDestination() != nil {
 		return buildByPassPlan(sql, vschema, true)
 	}
 	normalDDLPlan, onlineDDLPlan, err := buildDDLPlans(ctx, sql, ddlStatement, reservedVars, vschema, cfg)
@@ -85,7 +85,7 @@ func buildByPassPlan(sql string, vschema plancontext.VSchema, isDDL bool) (*plan
 	}
 	send := &engine.Send{
 		Keyspace:          keyspace,
-		TargetDestination: vschema.Destination(),
+		TargetDestination: vschema.ShardDestination(),
 		Query:             sql,
 		IsDDL:             isDDL,
 	}
@@ -93,7 +93,7 @@ func buildByPassPlan(sql string, vschema plancontext.VSchema, isDDL bool) (*plan
 }
 
 func buildDDLPlans(ctx context.Context, sql string, ddlStatement sqlparser.DDLStatement, reservedVars *sqlparser.ReservedVars, vschema plancontext.VSchema, cfg dynamicconfig.DDL) (*engine.Send, *engine.OnlineDDL, error) {
-	var destination key.Destination
+	var destination key.ShardDestination
 	var keyspace *vindexes.Keyspace
 	var err error
 
@@ -109,6 +109,8 @@ func buildDDLPlans(ctx context.Context, sql string, ddlStatement sqlparser.DDLSt
 		if err != nil {
 			return nil, nil, err
 		}
+		// Remove keyspace qualifiers from all table references (including foreign key references).
+		sqlparser.RemoveSpecificKeyspace(ddlStatement, keyspace.Name)
 		err = checkFKError(vschema, ddlStatement, keyspace)
 	case *sqlparser.CreateView:
 		destination, keyspace, err = buildCreateViewCommon(ctx, vschema, reservedVars, cfg, ddl.Select, ddl)
@@ -120,6 +122,10 @@ func buildDDLPlans(ctx context.Context, sql string, ddlStatement sqlparser.DDLSt
 		destination, keyspace, err = buildDropTable(vschema, ddlStatement)
 	case *sqlparser.RenameTable:
 		destination, keyspace, err = buildRenameTable(vschema, ddl)
+	case *sqlparser.CreateProcedure:
+		destination, keyspace, err = buildCreateProcedurePlan(vschema, ddl)
+	case *sqlparser.DropProcedure:
+		destination, keyspace, err = buildDropProcedurePlan(vschema, ddl)
 	default:
 		return nil, nil, vterrors.VT13001(fmt.Sprintf("unexpected DDL statement type: %T", ddlStatement))
 	}
@@ -150,6 +156,30 @@ func buildDDLPlans(ctx context.Context, sql string, ddlStatement sqlparser.DDLSt
 		}, nil
 }
 
+func buildDropProcedurePlan(vschema plancontext.VSchema, dp *sqlparser.DropProcedure) (key.ShardDestination, *vindexes.Keyspace, error) {
+	destination, keyspace, _, err := vschema.TargetDestination(dp.Name.Qualifier.String())
+	if err != nil {
+		return nil, nil, err
+	}
+	// Clear out the qualifier from the table name.
+	dp.SetTable("", dp.Name.Name.String())
+	return destination, keyspace, nil
+}
+
+func buildCreateProcedurePlan(vschema plancontext.VSchema, cp *sqlparser.CreateProcedure) (key.ShardDestination, *vindexes.Keyspace, error) {
+	destination, keyspace, _, err := vschema.TargetDestination(cp.Name.Qualifier.String())
+	if err != nil {
+		return nil, nil, err
+	}
+	if keyspace.Sharded {
+		return nil, nil, vterrors.VT12001("CREATE PROCEDURE is not supported on sharded keyspaces")
+	}
+	// Clear out the qualifier from the table name.
+	cp.SetTable("", cp.Name.Name.String())
+	sqlparser.RemoveSpecificKeyspace(cp, keyspace.Name)
+	return destination, keyspace, nil
+}
+
 func checkFKError(vschema plancontext.VSchema, ddlStatement sqlparser.DDLStatement, keyspace *vindexes.Keyspace) error {
 	fkMode, err := vschema.ForeignKeyMode(keyspace.Name)
 	if err != nil {
@@ -165,9 +195,9 @@ func checkFKError(vschema plancontext.VSchema, ddlStatement sqlparser.DDLStateme
 	return nil
 }
 
-func findTableDestinationAndKeyspace(vschema plancontext.VSchema, ddlStatement sqlparser.DDLStatement) (key.Destination, *vindexes.Keyspace, error) {
+func findTableDestinationAndKeyspace(vschema plancontext.VSchema, ddlStatement sqlparser.DDLStatement) (key.ShardDestination, *vindexes.Keyspace, error) {
 	var table *vindexes.BaseTable
-	var destination key.Destination
+	var destination key.ShardDestination
 	var keyspace *vindexes.Keyspace
 	var err error
 	table, _, _, _, destination, err = vschema.FindTableOrVindex(ddlStatement.GetTable())
@@ -196,11 +226,11 @@ func buildCreateViewCommon(
 	vschema plancontext.VSchema,
 	reservedVars *sqlparser.ReservedVars,
 	cfg dynamicconfig.DDL,
-	ddlSelect sqlparser.TableStatement,
+	sel sqlparser.TableStatement,
 	ddl sqlparser.DDLStatement,
-) (key.Destination, *vindexes.Keyspace, error) {
+) (key.ShardDestination, *vindexes.Keyspace, error) {
 	if vschema.IsViewsEnabled() {
-		return createViewEnabled(vschema, reservedVars, ddlSelect, ddl)
+		return createViewEnabled(vschema, reservedVars, sel, ddl)
 	}
 
 	// For Create View, we require that the keyspace exist and the select query can be satisfied within the keyspace itself
@@ -210,22 +240,33 @@ func buildCreateViewCommon(
 		return nil, nil, err
 	}
 
-	// because we don't trust the schema tracker to have up-to-date info, we don't want to expand any SELECT * here
+	// views definition with `select *` should not be expanded as schema tracker might not be up-to-date
+	// We copy the expressions and restore them after the planning context is created
 	var expressions []*sqlparser.SelectExprs
-	_ = sqlparser.VisitAllSelects(ddlSelect, func(p *sqlparser.Select, idx int) error {
+	_ = sqlparser.VisitAllSelects(sel, func(p *sqlparser.Select, idx int) error {
 		expressions = append(expressions, sqlparser.Clone(p.SelectExprs))
 		return nil
 	})
-	selectPlan, err := createInstructionFor(ctx, sqlparser.String(ddlSelect), ddlSelect, reservedVars, vschema, cfg)
+	selectPlan, err := createInstructionFor(ctx, sqlparser.String(sel), sel, reservedVars, vschema, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
-	selPlanKs := selectPlan.primitive.GetKeyspaceName()
-	if keyspace.Name != selPlanKs {
+
+	diffKs := false
+	engine.Visit(selectPlan.primitive, func(node engine.Primitive) {
+		if route, ok := node.(*engine.Route); ok {
+			if route.Keyspace.Name != keyspace.Name {
+				diffKs = true
+			}
+		}
+	})
+
+	if diffKs {
 		return nil, nil, vterrors.VT12001(ViewDifferentKeyspace)
 	}
 
-	_ = sqlparser.VisitAllSelects(ddlSelect, func(p *sqlparser.Select, idx int) error {
+	// We need to restore the original select expressions
+	_ = sqlparser.VisitAllSelects(sel, func(p *sqlparser.Select, idx int) error {
 		p.SelectExprs = expressions[idx]
 		return nil
 	})
@@ -242,7 +283,7 @@ func buildCreateViewCommon(
 	return destination, keyspace, nil
 }
 
-func createViewEnabled(vschema plancontext.VSchema, reservedVars *sqlparser.ReservedVars, ddlSelect sqlparser.TableStatement, ddl sqlparser.DDLStatement) (key.Destination, *vindexes.Keyspace, error) {
+func createViewEnabled(vschema plancontext.VSchema, reservedVars *sqlparser.ReservedVars, ddlSelect sqlparser.TableStatement, ddl sqlparser.DDLStatement) (key.ShardDestination, *vindexes.Keyspace, error) {
 	// For Create View, we require that the keyspace exist and the select query can be satisfied within the keyspace itself
 	// We should remove the keyspace name from the table name, as the database name in MySQL might be different than the keyspace name
 	destination, keyspace, err := findTableDestinationAndKeyspace(vschema, ddl)
@@ -281,6 +322,7 @@ func createViewEnabled(vschema plancontext.VSchema, reservedVars *sqlparser.Rese
 		return nil, nil, vterrors.VT12001(ViewDifferentKeyspace)
 	}
 
+	// We need to restore the original select expressions
 	_ = sqlparser.VisitAllSelects(ddlSelect, func(p *sqlparser.Select, idx int) error {
 		p.SelectExprs = expressions[idx]
 		return nil
@@ -291,7 +333,7 @@ func createViewEnabled(vschema plancontext.VSchema, reservedVars *sqlparser.Rese
 	return destination, keyspace, nil
 }
 
-func buildDropView(vschema plancontext.VSchema, ddlStatement sqlparser.DDLStatement) (key.Destination, *vindexes.Keyspace, error) {
+func buildDropView(vschema plancontext.VSchema, ddlStatement sqlparser.DDLStatement) (key.ShardDestination, *vindexes.Keyspace, error) {
 	if !vschema.IsViewsEnabled() {
 		return buildDropTable(vschema, ddlStatement)
 	}
@@ -319,16 +361,15 @@ func buildDropView(vschema plancontext.VSchema, ddlStatement sqlparser.DDLStatem
 	return key.DestinationAllShards{}, ks, nil
 }
 
-func buildDropTable(vschema plancontext.VSchema, ddlStatement sqlparser.DDLStatement) (key.Destination, *vindexes.Keyspace, error) {
-	var destination key.Destination
+func buildDropTable(vschema plancontext.VSchema, ddlStatement sqlparser.DDLStatement) (key.ShardDestination, *vindexes.Keyspace, error) {
+	var destination key.ShardDestination
 	var keyspace *vindexes.Keyspace
 	for i, tab := range ddlStatement.GetFromTables() {
-		var destinationTab key.Destination
+		var destinationTab key.ShardDestination
 		var keyspaceTab *vindexes.Keyspace
 		var table *vindexes.BaseTable
 		var err error
 		table, _, _, _, destinationTab, err = vschema.FindTableOrVindex(tab)
-
 		if err != nil {
 			var notFoundError vindexes.NotFoundError
 			isNotFound := errors.As(err, &notFoundError)
@@ -362,17 +403,16 @@ func buildDropTable(vschema plancontext.VSchema, ddlStatement sqlparser.DDLState
 	return destination, keyspace, nil
 }
 
-func buildRenameTable(vschema plancontext.VSchema, renameTable *sqlparser.RenameTable) (key.Destination, *vindexes.Keyspace, error) {
-	var destination key.Destination
+func buildRenameTable(vschema plancontext.VSchema, renameTable *sqlparser.RenameTable) (key.ShardDestination, *vindexes.Keyspace, error) {
+	var destination key.ShardDestination
 	var keyspace *vindexes.Keyspace
 
 	for _, tabPair := range renameTable.TablePairs {
-		var destinationFrom key.Destination
+		var destinationFrom key.ShardDestination
 		var keyspaceFrom *vindexes.Keyspace
 		var table *vindexes.BaseTable
 		var err error
 		table, _, _, _, destinationFrom, err = vschema.FindTableOrVindex(tabPair.FromTable)
-
 		if err != nil {
 			var notFoundError vindexes.NotFoundError
 			isNotFound := errors.As(err, &notFoundError)

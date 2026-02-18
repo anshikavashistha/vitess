@@ -2397,7 +2397,6 @@ func TestCreateTableDiff(t *testing.T) {
 				assert.Equal(t, ts.diff, diff)
 
 				if len(ts.diffs) > 0 {
-
 					allSubsequentDiffs := AllSubsequent(alter)
 					allSubsequentDiffsStatements := []string{}
 					for _, d := range allSubsequentDiffs {
@@ -2526,6 +2525,24 @@ func TestValidate(t *testing.T) {
 			from:      "create table t (id int primary key, id varchar(10))",
 			alter:     "alter table t add column i int",
 			expectErr: &ApplyDuplicateColumnError{Table: "t", Column: "id"},
+		},
+		{
+			name:  "matching utf8mb3 column and charset",
+			from:  "create table t (id int primary key, t text charset utf8mb3 collate utf8mb3_bin)",
+			alter: "alter table t engine=innodb",
+			to:    "create table t (id int primary key, t text charset utf8mb3 collate utf8mb3_bin)",
+		},
+		{
+			name:  "matching utf8mb4 column and charset",
+			from:  "create table t (id int primary key, t text charset utf8mb4 collate utf8mb4_bin)",
+			alter: "alter table t engine=innodb",
+			to:    "create table t (id int primary key, t text charset utf8mb4 collate utf8mb4_bin)",
+		},
+		{
+			name:      "mismatching column and charset",
+			from:      "create table t (id int primary key, t text charset utf8mb3 collate utf8mb4_bin)",
+			alter:     "alter table t engine=innodb",
+			expectErr: &MismatchedColumnCharsetCollationError{Column: "t", Charset: "utf8mb3", Collation: "utf8mb4_bin"},
 		},
 		// keys
 		{
@@ -2936,6 +2953,18 @@ func TestValidate(t *testing.T) {
 			alter: "alter table t drop column e",
 			to:    "create table t (id int, dateT datetime, primary key (id), constraint unix_epoch check (dateT < '1970-01-01'))",
 		},
+		{
+			name:      "drop check for foreign key constraint",
+			from:      "create table t (id int primary key, i int, constraint f foreign key (i) references parent(id))",
+			alter:     "alter table t drop check f",
+			expectErr: &ApplyKeyNotFoundError{Table: "t", Key: "f"},
+		},
+		{
+			name:      "drop foreign key for check constraint",
+			from:      "create table t (id int primary key, i int, constraint chk check (i > 0))",
+			alter:     "alter table t drop foreign key chk",
+			expectErr: &ApplyKeyNotFoundError{Table: "t", Key: "chk"},
+		},
 		// Foreign keys
 		{
 			name:      "existing foreign key, no such column",
@@ -3026,6 +3055,12 @@ func TestValidate(t *testing.T) {
 			from:  "create table t (id int primary key, i int, key i (i), key i2 (i), constraint f foreign key (i) references parent(id))",
 			alter: "alter table t drop key `i`",
 			to:    "create table t (id int primary key, i int, key i2 (i), constraint f foreign key (i) references parent(id))",
+		},
+		{
+			name:  "drop constraint foreign key",
+			from:  "create table t (id int primary key, i int, key i_idx (i), constraint f foreign key (i) references parent(id))",
+			alter: "alter table t drop constraint f",
+			to:    "create table t (id int primary key, i int, key i_idx (i))",
 		},
 	}
 	hints := DiffHints{}
@@ -3364,6 +3399,41 @@ func TestNormalize(t *testing.T) {
 			from: "create table t (id boolean primary key, b boolean)",
 			to:   "CREATE TABLE `t` (\n\t`id` tinyint(1),\n\t`b` tinyint(1),\n\tPRIMARY KEY (`id`)\n)",
 		},
+		{
+			name: "normalize text types with length information: implicit utf8mb4",
+			from: "create table t (id int primary key, t63_utf8mb4 text(63), t64_utf8mb4 text(64))",
+			to:   "CREATE TABLE `t` (\n\t`id` int,\n\t`t63_utf8mb4` tinytext,\n\t`t64_utf8mb4` text,\n\tPRIMARY KEY (`id`)\n)",
+		},
+		{
+			name: "normalize text types with length information: utf8mb4 table charset",
+			from: "create table t (id int primary key, t63_utf8mb4 text(63), t64_utf8mb4 text(64)) charset utf8mb4",
+			to:   "CREATE TABLE `t` (\n\t`id` int,\n\t`t63_utf8mb4` tinytext,\n\t`t64_utf8mb4` text,\n\tPRIMARY KEY (`id`)\n) CHARSET utf8mb4",
+		},
+		{
+			name: "normalize text types with length information: utf8mb3 table charset",
+			from: "create table t (id int primary key, t63_utf8mb3 text(63), t64_utf8mb3 text(64), t86_utf8mb3 text(86)) CHARACTER SET utf8mb3",
+			to:   "CREATE TABLE `t` (\n\t`id` int,\n\t`t63_utf8mb3` tinytext,\n\t`t64_utf8mb3` tinytext,\n\t`t86_utf8mb3` text,\n\tPRIMARY KEY (`id`)\n) CHARSET utf8mb3",
+		},
+		{
+			name: "normalize text types with length information: utf8mb3 column charset",
+			from: "create table t (id int primary key, t63_utf8mb3 text(63) charset utf8mb3, t64_utf8mb3 text(64) charset utf8mb3, t86_utf8mb3 text(86) charset utf8mb3)",
+			to:   "CREATE TABLE `t` (\n\t`id` int,\n\t`t63_utf8mb3` tinytext CHARACTER SET utf8mb3,\n\t`t64_utf8mb3` tinytext CHARACTER SET utf8mb3,\n\t`t86_utf8mb3` text CHARACTER SET utf8mb3,\n\tPRIMARY KEY (`id`)\n)",
+		},
+		{
+			name: "normalize text types with length information: ucs2 table charset",
+			from: "create table t (id int primary key, t63_ucs2 text(63), t64_ucs2 text(64), t86_ucs2 text(86), t128_ucs2 text(128), t256_ucs2 text(256)) CHARACTER SET ucs2",
+			to:   "CREATE TABLE `t` (\n\t`id` int,\n\t`t63_ucs2` tinytext,\n\t`t64_ucs2` tinytext,\n\t`t86_ucs2` tinytext,\n\t`t128_ucs2` text,\n\t`t256_ucs2` text,\n\tPRIMARY KEY (`id`)\n) CHARSET ucs2",
+		},
+		{
+			name: "normalize text types with length information: latin1 table charset",
+			from: "create table t (id int primary key, t63_latin1 text(63), t64_latin1 text(64), t86_latin1 text(86), t128_latin1 text(128), t256_latin1 text(256)) CHARACTER SET latin1",
+			to:   "CREATE TABLE `t` (\n\t`id` int,\n\t`t63_latin1` tinytext,\n\t`t64_latin1` tinytext,\n\t`t86_latin1` tinytext,\n\t`t128_latin1` tinytext,\n\t`t256_latin1` text,\n\tPRIMARY KEY (`id`)\n) CHARSET latin1",
+		},
+		{
+			name: "normalize blob types with length information",
+			from: "create table t (id int primary key, b127 blob(127), b128 blob(128), b255 blob(255), b256 blob(256), b65535 blob(65535), b65536 blob(65536), b16777215 blob(16777215), b16777216 blob(16777216))",
+			to:   "CREATE TABLE `t` (\n\t`id` int,\n\t`b127` tinyblob,\n\t`b128` tinyblob,\n\t`b255` tinyblob,\n\t`b256` blob,\n\t`b65535` blob,\n\t`b65536` mediumblob,\n\t`b16777215` mediumblob,\n\t`b16777216` longblob,\n\tPRIMARY KEY (`id`)\n)",
+		},
 	}
 	env := NewTestEnv()
 	for _, ts := range tt {
@@ -3469,7 +3539,7 @@ func TestIndexesCoveringForeignKeyColumns(t *testing.T) {
 	c, err := NewCreateTableEntity(env, createTable)
 	require.NoError(t, err)
 	tableColumns := map[string]sqlparser.IdentifierCI{}
-	for _, col := range c.CreateTable.TableSpec.Columns {
+	for _, col := range c.TableSpec.Columns {
 		tableColumns[col.Name.Lowered()] = col.Name
 	}
 	for _, ts := range tt {

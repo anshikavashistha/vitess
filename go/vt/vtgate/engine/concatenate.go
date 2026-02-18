@@ -56,36 +56,6 @@ func NewConcatenate(Sources []Primitive, ignoreCols []int) *Concatenate {
 	}
 }
 
-// RouteType returns a description of the query routing type used by the primitive
-func (c *Concatenate) RouteType() string {
-	return "Concatenate"
-}
-
-// GetKeyspaceName specifies the Keyspace that this primitive routes to
-func (c *Concatenate) GetKeyspaceName() string {
-	res := c.Sources[0].GetKeyspaceName()
-	for i := 1; i < len(c.Sources); i++ {
-		res = formatTwoOptionsNicely(res, c.Sources[i].GetKeyspaceName())
-	}
-	return res
-}
-
-// GetTableName specifies the table that this primitive routes to.
-func (c *Concatenate) GetTableName() string {
-	res := c.Sources[0].GetTableName()
-	for i := 1; i < len(c.Sources); i++ {
-		res = formatTwoOptionsNicely(res, c.Sources[i].GetTableName())
-	}
-	return res
-}
-
-func formatTwoOptionsNicely(a, b string) string {
-	if a == b {
-		return a
-	}
-	return a + "_" + b
-}
-
 // errWrongNumberOfColumnsInSelect is an error
 var errWrongNumberOfColumnsInSelect = vterrors.NewErrorf(vtrpcpb.Code_FAILED_PRECONDITION, vterrors.WrongNumberOfColumnsInSelect, "The used SELECT statements have a different number of columns")
 
@@ -199,16 +169,14 @@ func (c *Concatenate) parallelExec(ctx context.Context, vcursor VCursor, bindVar
 	for i, source := range c.Sources {
 		currIndex, currSource := i, source
 		vars := copyBindVars(bindVars)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			result, err := vcursor.ExecutePrimitive(ctx, currSource, vars, true)
 			if err != nil {
 				outerErr = err
 				cancel()
 			}
 			results[currIndex] = result
-		}()
+		})
 	}
 	wg.Wait()
 	return results, outerErr
@@ -333,7 +301,6 @@ func (c *Concatenate) parallelStreamExec(inCtx context.Context, vcursor VCursor,
 				}
 				return callback(resultChunk, currIndex)
 			})
-
 			// Error handling and context cleanup for this source.
 			if err != nil {
 				muFields.Lock()
@@ -480,5 +447,5 @@ func (c *Concatenate) Inputs() ([]Primitive, []map[string]any) {
 }
 
 func (c *Concatenate) description() PrimitiveDescription {
-	return PrimitiveDescription{OperatorType: c.RouteType()}
+	return PrimitiveDescription{OperatorType: "Concatenate"}
 }

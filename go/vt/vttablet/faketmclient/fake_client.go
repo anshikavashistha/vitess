@@ -283,6 +283,11 @@ func (client *FakeTabletManagerClient) StartReplication(ctx context.Context, tab
 	return nil
 }
 
+// RestartReplication is part of the tmclient.TabletManagerClient interface.
+func (client *FakeTabletManagerClient) RestartReplication(ctx context.Context, tablet *topodatapb.Tablet, semiSync bool) error {
+	return nil
+}
+
 // StartReplicationUntilAfter is part of the tmclient.TabletManagerClient interface.
 func (client *FakeTabletManagerClient) StartReplicationUntilAfter(ctx context.Context, tablet *topodatapb.Tablet, position string, duration time.Duration) error {
 	return nil
@@ -338,6 +343,16 @@ func (client *FakeTabletManagerClient) VReplicationWaitForPos(ctx context.Contex
 	return nil
 }
 
+// UpdateSequenceTables is part of the tmclient.TabletManagerClient interface.
+func (itmc *FakeTabletManagerClient) UpdateSequenceTables(ctx context.Context, tablet *topodatapb.Tablet, request *tabletmanagerdatapb.UpdateSequenceTablesRequest) (*tabletmanagerdatapb.UpdateSequenceTablesResponse, error) {
+	return nil, nil
+}
+
+// GetMaxValueForSequences is part of the tmclient.TabletManagerClient interface.
+func (itmc *FakeTabletManagerClient) GetMaxValueForSequences(ctx context.Context, tablet *topodatapb.Tablet, request *tabletmanagerdatapb.GetMaxValueForSequencesRequest) (*tabletmanagerdatapb.GetMaxValueForSequencesResponse, error) {
+	return nil, nil
+}
+
 //
 // Reparenting related functions
 //
@@ -363,7 +378,7 @@ func (client *FakeTabletManagerClient) ReadReparentJournalInfo(ctx context.Conte
 }
 
 // DemotePrimary is part of the tmclient.TabletManagerClient interface.
-func (client *FakeTabletManagerClient) DemotePrimary(ctx context.Context, tablet *topodatapb.Tablet) (*replicationdatapb.PrimaryStatus, error) {
+func (client *FakeTabletManagerClient) DemotePrimary(ctx context.Context, tablet *topodatapb.Tablet, force bool) (*replicationdatapb.PrimaryStatus, error) {
 	return nil, nil
 }
 

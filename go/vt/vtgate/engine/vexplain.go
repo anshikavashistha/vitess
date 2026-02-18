@@ -55,21 +55,6 @@ type (
 
 var _ Primitive = (*VExplain)(nil)
 
-// RouteType implements the Primitive interface
-func (v *VExplain) RouteType() string {
-	return v.Input.RouteType()
-}
-
-// GetKeyspaceName implements the Primitive interface
-func (v *VExplain) GetKeyspaceName() string {
-	return v.Input.GetKeyspaceName()
-}
-
-// GetTableName implements the Primitive interface
-func (v *VExplain) GetTableName() string {
-	return v.Input.GetTableName()
-}
-
 // GetFields implements the Primitive interface
 func (v *VExplain) GetFields(context.Context, VCursor, map[string]*querypb.BindVariable) (*sqltypes.Result, error) {
 	var fields []*querypb.Field
@@ -100,8 +85,8 @@ func getVExplainQueriesFields() []*querypb.Field {
 		{Name: "#", Type: sqltypes.Int32},
 		{Name: "keyspace", Type: sqltypes.VarChar},
 		{Name: "shard", Type: sqltypes.VarChar},
-		{Name: "query", Type: sqltypes.VarChar}}
-
+		{Name: "query", Type: sqltypes.VarChar},
+	}
 }
 
 func getVExplainAllFields() []*querypb.Field {

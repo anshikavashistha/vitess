@@ -18,7 +18,7 @@ package cache_test
 
 import (
 	"context"
-	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -123,7 +123,7 @@ func TestBackfillQueueSize(t *testing.T) {
 			}, cache.Config{
 				BackfillQueueSize: tt.configuredBackfillQueueSize,
 			})
-			var config cache.Config = c.Debug()["config"].(cache.Config)
+			config := c.Debug()["config"].(cache.Config)
 			assert.Equal(t, tt.expectedBackfillQueueSize, config.BackfillQueueSize)
 		})
 	}
@@ -194,7 +194,7 @@ func TestBackfillTTL(t *testing.T) {
 
 type intkey int
 
-func (k intkey) Key() string { return fmt.Sprintf("%d", int(k)) }
+func (k intkey) Key() string { return strconv.Itoa(int(k)) }
 
 func TestEnqueueBackfillTimeout(t *testing.T) {
 	t.Parallel()
@@ -208,7 +208,7 @@ func TestEnqueueBackfillTimeout(t *testing.T) {
 		BackfillEnqueueWaitTime: time.Millisecond * 10,
 	})
 
-	var enqueues = []struct {
+	enqueues := []struct {
 		shouldFail bool
 		msg        string
 	}{
@@ -224,5 +224,50 @@ func TestEnqueueBackfillTimeout(t *testing.T) {
 	for i, q := range enqueues {
 		ok := c.EnqueueBackfill(intkey(i))
 		assert.Equal(t, q.shouldFail, !ok, "enqueue should %s wait timeout", q.msg)
+	}
+}
+
+func TestUpsertCacheKey(t *testing.T) {
+	var callcount int
+	c := cache.New(func(ctx context.Context, req intkey) (any, error) {
+		time.Sleep(time.Millisecond * 50) // make fills take time so that the second enqueue exceeds WaitTimeout
+		callcount++
+		return nil, nil
+	}, cache.Config{
+		BackfillEnqueueWaitTime: time.Millisecond * 10,
+	})
+
+	inserts := []struct {
+		shouldFail  bool
+		msg         string
+		key         intkey
+		val         any
+		expectedVal any
+		duration    time.Duration
+	}{
+		{
+			shouldFail:  false,
+			key:         intkey(1),
+			val:         "Old Value",
+			msg:         "first add should succeed",
+			expectedVal: "Old Value",
+		},
+		{
+			shouldFail:  false,
+			key:         intkey(1),
+			val:         "New Value",
+			msg:         "second update should succeed",
+			expectedVal: "New Value",
+		},
+	}
+	for _, tt := range inserts {
+		err := c.Add(tt.key, tt.val, tt.duration)
+		if !tt.shouldFail {
+			assert.Nil(t, err)
+		}
+
+		val, exists := c.Get(tt.key)
+		assert.True(t, exists)
+		assert.Equal(t, val, tt.expectedVal)
 	}
 }

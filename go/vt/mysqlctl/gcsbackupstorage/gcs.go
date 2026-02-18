@@ -20,6 +20,7 @@ package gcsbackupstorage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -32,11 +33,11 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 
-	"vitess.io/vitess/go/vt/mysqlctl/errors"
-
 	"vitess.io/vitess/go/trace"
 	"vitess.io/vitess/go/vt/mysqlctl/backupstorage"
+	mysqlctlerrors "vitess.io/vitess/go/vt/mysqlctl/errors"
 	"vitess.io/vitess/go/vt/servenv"
+	"vitess.io/vitess/go/vt/utils"
 )
 
 var (
@@ -48,8 +49,8 @@ var (
 )
 
 func registerFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&bucket, "gcs_backup_storage_bucket", "", "Google Cloud Storage bucket to use for backups.")
-	fs.StringVar(&root, "gcs_backup_storage_root", "", "Root prefix for all backup-related object names.")
+	utils.SetFlagStringVar(fs, &bucket, "gcs-backup-storage-bucket", "", "Google Cloud Storage bucket to use for backups.")
+	utils.SetFlagStringVar(fs, &root, "gcs-backup-storage-root", "", "Root prefix for all backup-related object names.")
 }
 
 func init() {
@@ -66,7 +67,7 @@ type GCSBackupHandle struct {
 	dir      string
 	name     string
 	readOnly bool
-	errors.PerFileErrorRecorder
+	mysqlctlerrors.PerFileErrorRecorder
 }
 
 // Directory implements BackupHandle.
@@ -82,7 +83,7 @@ func (bh *GCSBackupHandle) Name() string {
 // AddFile implements BackupHandle.
 func (bh *GCSBackupHandle) AddFile(ctx context.Context, filename string, filesize int64) (io.WriteCloser, error) {
 	if bh.readOnly {
-		return nil, fmt.Errorf("AddFile cannot be called on read-only backup")
+		return nil, errors.New("AddFile cannot be called on read-only backup")
 	}
 	object := objName(bh.dir, bh.name, filename)
 	return bh.client.Bucket(bucket).Object(object).NewWriter(ctx), nil
@@ -91,7 +92,7 @@ func (bh *GCSBackupHandle) AddFile(ctx context.Context, filename string, filesiz
 // EndBackup implements BackupHandle.
 func (bh *GCSBackupHandle) EndBackup(ctx context.Context) error {
 	if bh.readOnly {
-		return fmt.Errorf("EndBackup cannot be called on read-only backup")
+		return errors.New("EndBackup cannot be called on read-only backup")
 	}
 	return nil
 }
@@ -99,7 +100,7 @@ func (bh *GCSBackupHandle) EndBackup(ctx context.Context) error {
 // AbortBackup implements BackupHandle.
 func (bh *GCSBackupHandle) AbortBackup(ctx context.Context) error {
 	if bh.readOnly {
-		return fmt.Errorf("AbortBackup cannot be called on read-only backup")
+		return errors.New("AbortBackup cannot be called on read-only backup")
 	}
 	return bh.bs.RemoveBackup(ctx, bh.dir, bh.name)
 }
@@ -107,7 +108,7 @@ func (bh *GCSBackupHandle) AbortBackup(ctx context.Context) error {
 // ReadFile implements BackupHandle.
 func (bh *GCSBackupHandle) ReadFile(ctx context.Context, filename string) (io.ReadCloser, error) {
 	if !bh.readOnly {
-		return nil, fmt.Errorf("ReadFile cannot be called on read-write backup")
+		return nil, errors.New("ReadFile cannot be called on read-write backup")
 	}
 	object := objName(bh.dir, bh.name, filename)
 	return bh.client.Bucket(bucket).Object(object).NewReader(ctx)
@@ -232,7 +233,9 @@ func (bs *GCSBackupStorage) Close() error {
 		// so we know to create a new client the next time one
 		// is needed.
 		client := bs._client
-		bs._client = nil
+		defer func() {
+			bs._client = nil
+		}()
 		if err := client.Close(); err != nil {
 			return err
 		}
@@ -271,7 +274,7 @@ func (bs *GCSBackupStorage) client(ctx context.Context) (*storage.Client, error)
 
 // objName joins path parts into an object name.
 // Unlike path.Join, it doesn't collapse ".." or strip trailing slashes.
-// It also adds the value of the --gcs_backup_storage_root flag if set.
+// It also adds the value of the --gcs-backup-storage-root flag if set.
 func objName(parts ...string) string {
 	if root != "" {
 		return root + "/" + strings.Join(parts, "/")

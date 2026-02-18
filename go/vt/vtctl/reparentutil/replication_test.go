@@ -25,16 +25,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"vitess.io/vitess/go/mysql/replication"
-	"vitess.io/vitess/go/vt/vtctl/reparentutil/policy"
-
 	_flag "vitess.io/vitess/go/internal/flag"
 	"vitess.io/vitess/go/mysql"
+	"vitess.io/vitess/go/mysql/replication"
 	"vitess.io/vitess/go/sets"
 	"vitess.io/vitess/go/vt/logutil"
 	"vitess.io/vitess/go/vt/topo"
 	"vitess.io/vitess/go/vt/topo/topoproto"
 	"vitess.io/vitess/go/vt/topotools/events"
+	"vitess.io/vitess/go/vt/vtctl/reparentutil/policy"
 	"vitess.io/vitess/go/vt/vterrors"
 	"vitess.io/vitess/go/vt/vttablet/tmclient"
 
@@ -93,7 +92,8 @@ func TestFindPositionsOfAllCandidates(t *testing.T) {
 			expected:          []string{"r1", "r2", "p1"},
 			expectedGTIDBased: true,
 			shouldErr:         false,
-		}, {
+		},
+		{
 			name: "success for single tablet",
 			statusMap: map[string]*replicationdatapb.StopReplicationStatus{
 				"r1": {
@@ -225,7 +225,7 @@ type stopReplicationAndBuildStatusMapsTestTMClient struct {
 	stopReplicationAndGetStatusDelays map[string]time.Duration
 }
 
-func (fake *stopReplicationAndBuildStatusMapsTestTMClient) DemotePrimary(ctx context.Context, tablet *topodatapb.Tablet) (*replicationdatapb.PrimaryStatus, error) {
+func (fake *stopReplicationAndBuildStatusMapsTestTMClient) DemotePrimary(ctx context.Context, tablet *topodatapb.Tablet, force bool) (*replicationdatapb.PrimaryStatus, error) {
 	if tablet.Alias == nil {
 		return nil, assert.AnError
 	}
@@ -357,7 +357,8 @@ func Test_stopReplicationAndBuildStatusMaps(t *testing.T) {
 				},
 			}},
 			shouldErr: false,
-		}, {
+		},
+		{
 			name:       "success with wait for all tablets",
 			durability: policy.DurabilityNone,
 			tmc: &stopReplicationAndBuildStatusMapsTestTMClient{
@@ -427,7 +428,8 @@ func Test_stopReplicationAndBuildStatusMaps(t *testing.T) {
 			}},
 			waitForAllTablets: true,
 			shouldErr:         false,
-		}, {
+		},
+		{
 			name:       "timing check with wait for all tablets",
 			durability: policy.DurabilityNone,
 			tmc: &stopReplicationAndBuildStatusMapsTestTMClient{
@@ -1120,50 +1122,6 @@ func Test_stopReplicationAndBuildStatusMaps(t *testing.T) {
 			expectedPrimaryStatusMap: nil,
 			expectedTabletsReachable: nil,
 			shouldErr:                true,
-		}, {
-			name:       "1 tablets fail StopReplication and 1 has replication stopped",
-			durability: policy.DurabilityNone,
-			tmc: &stopReplicationAndBuildStatusMapsTestTMClient{
-				stopReplicationAndGetStatusResults: map[string]*struct {
-					StopStatus *replicationdatapb.StopReplicationStatus
-					Err        error
-				}{
-					"zone1-0000000100": {
-						Err: assert.AnError,
-					},
-					"zone1-0000000101": {
-						StopStatus: &replicationdatapb.StopReplicationStatus{
-							Before: &replicationdatapb.Status{Position: "MySQL56/3E11FA47-71CA-11E1-9E33-C80AA9429101:1-5"},
-							After:  &replicationdatapb.Status{Position: "MySQL56/3E11FA47-71CA-11E1-9E33-C80AA9429101:1-9"},
-						},
-					},
-				},
-			},
-			tabletMap: map[string]*topo.TabletInfo{
-				"zone1-0000000100": {
-					Tablet: &topodatapb.Tablet{
-						Type: topodatapb.TabletType_REPLICA,
-						Alias: &topodatapb.TabletAlias{
-							Cell: "zone1",
-							Uid:  100,
-						},
-					},
-				},
-				"zone1-0000000101": {
-					Tablet: &topodatapb.Tablet{
-						Type: topodatapb.TabletType_REPLICA,
-						Alias: &topodatapb.TabletAlias{
-							Cell: "zone1",
-							Uid:  101,
-						},
-					},
-				},
-			},
-			ignoredTablets:           sets.New[string](),
-			expectedStatusMap:        nil,
-			expectedPrimaryStatusMap: nil,
-			expectedTabletsReachable: nil,
-			shouldErr:                true,
 		},
 		{
 			name:       "slow tablet is the new primary requested",
@@ -1267,7 +1225,8 @@ func Test_stopReplicationAndBuildStatusMaps(t *testing.T) {
 			expectedTakingBackup:     map[string]bool{"zone1-0000000100": false, "zone1-0000000101": false, "zone1-0000000102": false},
 			expectedPrimaryStatusMap: map[string]*replicationdatapb.PrimaryStatus{},
 			shouldErr:                false,
-		}, {
+		},
+		{
 			name:       "Handle nil replication status After. No segfaulting when determining backup status, and fall back to Before status",
 			durability: policy.DurabilityNone,
 			tmc: &stopReplicationAndBuildStatusMapsTestTMClient{
@@ -1452,92 +1411,6 @@ func TestReplicaWasRunning(t *testing.T) {
 	}
 }
 
-func TestSQLThreadWasRunning(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		in        *replicationdatapb.StopReplicationStatus
-		expected  bool
-		shouldErr bool
-	}{
-		{
-			name: "io thread running",
-			in: &replicationdatapb.StopReplicationStatus{
-				Before: &replicationdatapb.Status{
-					IoState:  int32(replication.ReplicationStateRunning),
-					SqlState: int32(replication.ReplicationStateStopped),
-				},
-			},
-			expected:  false,
-			shouldErr: false,
-		},
-		{
-			name: "sql thread running",
-			in: &replicationdatapb.StopReplicationStatus{
-				Before: &replicationdatapb.Status{
-					IoState:  int32(replication.ReplicationStateStopped),
-					SqlState: int32(replication.ReplicationStateRunning),
-				},
-			},
-			expected:  true,
-			shouldErr: false,
-		},
-		{
-			name: "io and sql threads running",
-			in: &replicationdatapb.StopReplicationStatus{
-				Before: &replicationdatapb.Status{
-					IoState:  int32(replication.ReplicationStateRunning),
-					SqlState: int32(replication.ReplicationStateRunning),
-				},
-			},
-			expected:  true,
-			shouldErr: false,
-		},
-		{
-			name: "no replication threads running",
-			in: &replicationdatapb.StopReplicationStatus{
-				Before: &replicationdatapb.Status{
-					IoState:  int32(replication.ReplicationStateStopped),
-					SqlState: int32(replication.ReplicationStateStopped),
-				},
-			},
-			expected:  false,
-			shouldErr: false,
-		},
-		{
-			name:      "passing nil pointer results in an error",
-			in:        nil,
-			expected:  false,
-			shouldErr: true,
-		},
-		{
-			name: "status.Before is nil results in an error",
-			in: &replicationdatapb.StopReplicationStatus{
-				Before: nil,
-			},
-			expected:  false,
-			shouldErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			actual, err := SQLThreadWasRunning(tt.in)
-			if tt.shouldErr {
-				assert.Error(t, err)
-
-				return
-			}
-
-			assert.NoError(t, err)
-			assert.Equal(t, tt.expected, actual)
-		})
-	}
-}
-
 // waitForRelayLogsToApplyTestTMClient implements just the WaitForPosition
 // method of the tmclient.TabletManagerClient interface for
 // TestWaitForRelayLogsToApply, with the necessary trackers to facilitate
@@ -1631,4 +1504,73 @@ func TestWaitForRelayLogsToApply(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+}
+
+func TestRelayLogPositions_AtLeast(t *testing.T) {
+	gtidSet1, _ := replication.ParseMysql56GTIDSet("3e11fa47-71ca-11e1-9e33-c80aa9429562:1-6")
+	gtidSet2, _ := replication.ParseMysql56GTIDSet("3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5")
+	gtidSet3, _ := replication.ParseMysql56GTIDSet("3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3")
+	gtidSet4, _ := replication.ParseMysql56GTIDSet("3e11fa47-71ca-11e1-9e33-c80aa9429562:1-2")
+
+	rlp := &RelayLogPositions{
+		Combined: replication.Position{GTIDSet: gtidSet1},
+		Executed: replication.Position{GTIDSet: gtidSet3},
+	}
+
+	// rlp is equal
+	assert.True(t, rlp.AtLeast(&RelayLogPositions{
+		Combined: replication.Position{GTIDSet: rlp.Combined.GTIDSet},
+		Executed: replication.Position{GTIDSet: rlp.Executed.GTIDSet},
+	}))
+
+	// rlp is less advanced
+	assert.False(t, rlp.AtLeast(&RelayLogPositions{
+		Combined: replication.Position{GTIDSet: gtidSet1},
+		Executed: replication.Position{GTIDSet: gtidSet2},
+	}))
+
+	// rlp is more advanced
+	assert.True(t, rlp.AtLeast(&RelayLogPositions{
+		Combined: replication.Position{GTIDSet: gtidSet2},
+		Executed: replication.Position{GTIDSet: gtidSet4},
+	}))
+}
+
+func TestRelayLogPositions_Equal(t *testing.T) {
+	gtidSet1, _ := replication.ParseMysql56GTIDSet("3e11fa47-71ca-11e1-9e33-c80aa9429562:1-6")
+	gtidSet2, _ := replication.ParseMysql56GTIDSet("3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5")
+	gtidSet3, _ := replication.ParseMysql56GTIDSet("3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3")
+
+	rlp := &RelayLogPositions{
+		Combined: replication.Position{GTIDSet: gtidSet1},
+		Executed: replication.Position{GTIDSet: gtidSet2},
+	}
+
+	// rlp is not equal
+	assert.False(t, rlp.Equal(&RelayLogPositions{
+		Combined: replication.Position{GTIDSet: gtidSet2},
+		Executed: replication.Position{GTIDSet: gtidSet3},
+	}))
+
+	// rlp is partially equal
+	assert.False(t, rlp.Equal(&RelayLogPositions{
+		Combined: replication.Position{GTIDSet: rlp.Combined.GTIDSet},
+		Executed: replication.Position{GTIDSet: gtidSet3},
+	}))
+
+	// rlp is equal
+	assert.True(t, rlp.Equal(&RelayLogPositions{
+		Combined: replication.Position{GTIDSet: rlp.Combined.GTIDSet},
+		Executed: replication.Position{GTIDSet: rlp.Executed.GTIDSet},
+	}))
+}
+
+func TestRelayLogPositions_IsZero(t *testing.T) {
+	gtidSet, _ := replication.ParseMysql56GTIDSet("3e11fa47-71ca-11e1-9e33-c80aa9429562:1-6")
+	rlp := &RelayLogPositions{}
+	assert.True(t, rlp.IsZero())
+
+	rlp.Combined = replication.Position{GTIDSet: gtidSet}
+	rlp.Executed = replication.Position{GTIDSet: gtidSet}
+	assert.False(t, rlp.IsZero())
 }

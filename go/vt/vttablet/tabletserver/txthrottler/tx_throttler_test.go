@@ -58,8 +58,7 @@ func TestDisabledThrottler(t *testing.T) {
 }
 
 func TestEnabledThrottler(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 
@@ -67,8 +66,8 @@ func TestEnabledThrottler(t *testing.T) {
 	ts := memorytopo.NewServer(ctx, "cell1", "cell2")
 
 	mockHealthCheck := NewMockHealthCheck(mockCtrl)
-	hcCall1 := mockHealthCheck.EXPECT().Subscribe()
-	hcCall1.Do(func() {})
+	hcCall1 := mockHealthCheck.EXPECT().Subscribe("TxThrottler")
+	hcCall1.Do(func(string) {})
 	hcCall2 := mockHealthCheck.EXPECT().RegisterStats()
 	hcCall2.Do(func() {})
 	hcCall2.After(hcCall1)
@@ -189,8 +188,7 @@ func TestEnabledThrottler(t *testing.T) {
 }
 
 func TestFetchKnownCells(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	{
 		ts := memorytopo.NewServer(ctx, "cell1", "cell2")
 		cells := fetchKnownCells(context.Background(), ts, &querypb.Target{Cell: "cell1"})
@@ -244,10 +242,9 @@ type mockTxThrottlerState struct {
 }
 
 func (t *mockTxThrottlerState) deallocateResources() {
-
 }
-func (t *mockTxThrottlerState) StatsUpdate(tabletStats *discovery.TabletHealth) {
 
+func (t *mockTxThrottlerState) StatsUpdate(tabletStats *discovery.TabletHealth) {
 }
 
 func (t *mockTxThrottlerState) throttle() bool {

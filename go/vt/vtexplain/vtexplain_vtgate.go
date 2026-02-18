@@ -33,6 +33,10 @@ import (
 	"vitess.io/vitess/go/vt/discovery"
 	"vitess.io/vitess/go/vt/key"
 	"vitess.io/vitess/go/vt/log"
+	querypb "vitess.io/vitess/go/vt/proto/query"
+	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
+	vschemapb "vitess.io/vitess/go/vt/proto/vschema"
+	vtgatepb "vitess.io/vitess/go/vt/proto/vtgate"
 	"vitess.io/vitess/go/vt/srvtopo"
 	"vitess.io/vitess/go/vt/topo"
 	"vitess.io/vitess/go/vt/vterrors"
@@ -42,11 +46,6 @@ import (
 	"vitess.io/vitess/go/vt/vtgate/logstats"
 	"vitess.io/vitess/go/vt/vtgate/vindexes"
 	"vitess.io/vitess/go/vt/vttablet/queryservice"
-
-	querypb "vitess.io/vitess/go/vt/proto/query"
-	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
-	vschemapb "vitess.io/vitess/go/vt/proto/vschema"
-	vtgatepb "vitess.io/vitess/go/vt/proto/vtgate"
 )
 
 func (vte *VTExplain) initVtgateExecutor(ctx context.Context, ts *topo.Server, vSchemaStr, ksShardMapStr string, opts *Options, srvTopoCounts *stats.CountersWithSingleLabel) error {
@@ -75,6 +74,7 @@ func (vte *VTExplain) initVtgateExecutor(ctx context.Context, ts *topo.Server, v
 	queryLogBufferSize := 10
 	plans := theine.NewStore[vtgate.PlanCacheKey, *engine.Plan](4*1024*1024, false)
 	eConfig := vtgate.ExecutorConfig{
+		Name:         "TestExecutor",
 		Normalize:    opts.Normalize,
 		StreamSize:   streamSize,
 		AllowScatter: true,
@@ -176,7 +176,7 @@ func (vte *VTExplain) buildTopology(ctx context.Context, ts *topo.Server, opts *
 				continue
 			}
 			hostname := fmt.Sprintf("%s/%s", ks, shard.Name)
-			log.Infof("registering test tablet %s for keyspace %s shard %s", hostname, ks, shard.Name)
+			log.Info(fmt.Sprintf("registering test tablet %s for keyspace %s shard %s", hostname, ks, shard.Name))
 
 			tablet := vte.healthCheck.AddFakeTablet(Cell, hostname, 1, ks, shard.Name, topodatapb.TabletType_PRIMARY, true, 1, nil, func(t *topodatapb.Tablet) queryservice.QueryService {
 				return vte.newTablet(ctx, vte.env, opts, t, ts, srvTopoCounts)
@@ -213,7 +213,6 @@ func getShardRanges(ks string, vschema *vschemapb.Keyspace, ksShardMap map[strin
 			shards = append(shards, ref)
 		}
 		return shards, nil
-
 	}
 
 	numShards := 1
@@ -243,7 +242,7 @@ func (vte *VTExplain) vtgateExecute(sql string) ([]*engine.Plan, map[string]*Tab
 	// This will ensure that the commit/rollback order is predictable.
 	vte.sortShardSession()
 
-	_, err := vte.vtgateExecutor.Execute(context.Background(), nil, "VtexplainExecute", econtext.NewSafeSession(vte.vtgateSession), sql, nil)
+	_, err := vte.vtgateExecutor.Execute(context.Background(), nil, "VtexplainExecute", econtext.NewSafeSession(vte.vtgateSession), sql, nil, false)
 	if err != nil {
 		for _, tc := range vte.explainTopo.TabletConns {
 			tc.tabletQueries = nil

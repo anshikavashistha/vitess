@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"vitess.io/vitess/go/test/utils"
@@ -66,7 +67,6 @@ func TestJsonConfigParser(t *testing.T) {
 	}`
 	err = ParseConfig([]byte(jsonConfig), &config)
 	require.Error(t, err, "Invalid config should have errored, but didn't")
-
 }
 
 func TestValidateHashGetter(t *testing.T) {
@@ -106,7 +106,6 @@ func TestHostMatcher(t *testing.T) {
 	socket := &net.UnixAddr{Name: "unixSocket", Net: "1"}
 	match = MatchSourceHost(net.Addr(socket), "localhost")
 	require.True(t, match, "Should match socket when target is localhost")
-
 }
 
 func TestStaticConfigHUP(t *testing.T) {
@@ -117,7 +116,7 @@ func TestStaticConfigHUP(t *testing.T) {
 
 	oldStr := "str5"
 	jsonConfig := fmt.Sprintf("{\"%s\":[{\"Password\":\"%s\"}]}", oldStr, oldStr)
-	if err := os.WriteFile(tmpFile.Name(), []byte(jsonConfig), 0600); err != nil {
+	if err := os.WriteFile(tmpFile.Name(), []byte(jsonConfig), 0o600); err != nil {
 		t.Fatalf("couldn't write temp file: %v", err)
 	}
 
@@ -147,7 +146,7 @@ func TestStaticConfigHUPWithRotation(t *testing.T) {
 
 	oldStr := "str1"
 	jsonConfig := fmt.Sprintf("{\"%s\":[{\"Password\":\"%s\"}]}", oldStr, oldStr)
-	if err := os.WriteFile(tmpFile.Name(), []byte(jsonConfig), 0600); err != nil {
+	if err := os.WriteFile(tmpFile.Name(), []byte(jsonConfig), 0o600); err != nil {
 		t.Fatalf("couldn't write temp file: %v", err)
 	}
 
@@ -171,33 +170,33 @@ func TestStaticConfigHUPWithRotation(t *testing.T) {
 
 func hupTest(t *testing.T, aStatic *AuthServerStatic, tmpFile *os.File, oldStr, newStr string) {
 	jsonConfig := fmt.Sprintf("{\"%s\":[{\"Password\":\"%s\"}]}", newStr, newStr)
-	if err := os.WriteFile(tmpFile.Name(), []byte(jsonConfig), 0600); err != nil {
+	if err := os.WriteFile(tmpFile.Name(), []byte(jsonConfig), 0o600); err != nil {
 		t.Fatalf("couldn't overwrite temp file: %v", err)
 	}
 	require.Equal(t, oldStr, aStatic.getEntries()[oldStr][0].Password, "%s's Password should still be '%s'", oldStr, oldStr)
 
 	syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
-	time.Sleep(100 * time.Millisecond)
-	// wait for signal handler
-	require.Nil(t, aStatic.getEntries()[oldStr], "Should not have old %s after config reload", oldStr)
-	require.Equal(t, newStr, aStatic.getEntries()[newStr][0].Password, "%s's Password should be '%s'", newStr, newStr)
 
+	// wait for signal handler
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		require.Nil(c, aStatic.getEntries()[oldStr], "Should not have old %s after config reload", oldStr)
+		require.Equal(c, newStr, aStatic.getEntries()[newStr][0].Password, "%s's Password should be '%s'", newStr, newStr)
+	}, 30*time.Second, 10*time.Millisecond, "config should be reloaded with new file after rotation")
 }
 
 func hupTestWithRotation(t *testing.T, aStatic *AuthServerStatic, tmpFile *os.File, oldStr, newStr string) {
 	jsonConfig := fmt.Sprintf("{\"%s\":[{\"Password\":\"%s\"}]}", newStr, newStr)
-	if err := os.WriteFile(tmpFile.Name(), []byte(jsonConfig), 0600); err != nil {
+	if err := os.WriteFile(tmpFile.Name(), []byte(jsonConfig), 0o600); err != nil {
 		t.Fatalf("couldn't overwrite temp file: %v", err)
 	}
 
-	time.Sleep(20 * time.Millisecond)
-	// wait for signal handler
-	require.Nil(t, aStatic.getEntries()[oldStr], "Should not have old %s after config reload", oldStr)
-	require.Equal(t, newStr, aStatic.getEntries()[newStr][0].Password, "%s's Password should be '%s'", newStr, newStr)
-
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		require.Nil(c, aStatic.getEntries()[oldStr], "Should not have old %s after config reload", oldStr)
+		require.Equal(c, newStr, aStatic.getEntries()[newStr][0].Password, "%s's Password should be '%s'", newStr, newStr)
+	}, 30*time.Second, 10*time.Millisecond, "config should be reloaded with new file after rotation")
 }
 
-func TestStaticPasswords(t *testing.T) {
+func TestStaticMysqlNativePasswords(t *testing.T) {
 	_ = utils.LeakCheckContext(t)
 	jsonConfig := `
 {
@@ -254,10 +253,74 @@ func TestStaticPasswords(t *testing.T) {
 
 			if c.success {
 				require.NoError(t, err, "authentication should have succeeded: %v", err)
-
 			} else {
 				require.Error(t, err, "authentication should have failed")
+			}
+		})
+	}
+}
 
+func TestStaticCachingSha2Passwords(t *testing.T) {
+	_ = utils.LeakCheckContext(t)
+	jsonConfig := `
+{
+	"user01": [{ "Password": "user01" }],
+	"user02": [{
+		"CachingSha2Password": "*d2a47945c740b8ddc53f575733003b68961290d5224a4aedfdb57c8726bb3979"
+	}],
+	"user03": [{
+		"CachingSha2Password": "*0c5cfbb1ce7cae7dcab30b0cfeae014ffe060d93f4221fe6d7e25b27862290bc",
+		"Password": "invalid"
+	}],
+	"user04": [
+		{ "CachingSha2Password": "*f69686990e0cf15788dab923bf49ea34c8ee6d715f0861802a410651018459b7" },
+		{ "Password": "password2" }
+	]
+}`
+
+	tests := []struct {
+		user     string
+		password string
+		success  bool
+	}{
+		{"user01", "user01", true},
+		{"user01", "password", false},
+		{"user01", "", false},
+		{"user02", "user02", true},
+		{"user02", "password", false},
+		{"user02", "", false},
+		{"user03", "user03", true},
+		{"user03", "password", false},
+		{"user03", "invalid", false},
+		{"user03", "", false},
+		{"user04", "password1", true},
+		{"user04", "password2", true},
+		{"user04", "", false},
+		{"userXX", "", false},
+		{"userXX", "", false},
+		{"", "", false},
+		{"", "password", false},
+	}
+
+	auth := NewAuthServerStatic("", jsonConfig, 0)
+	defer auth.close()
+	ip := net.ParseIP("127.0.0.1")
+	addr := &net.IPAddr{IP: ip, Zone: ""}
+
+	for _, c := range tests {
+		t.Run(fmt.Sprintf("%s-%s", c.user, c.password), func(t *testing.T) {
+			salt, err := newSalt()
+			require.NoError(t, err, "error generating salt: %v", err)
+
+			scrambled := ScrambleCachingSha2Password(salt, []byte(c.password))
+			_, status, err := auth.UserEntryWithCacheHash(nil, salt, c.user, scrambled, addr)
+
+			if c.success {
+				require.Equal(t, AuthAccepted, status)
+				require.NoError(t, err)
+			} else {
+				require.Equal(t, AuthRejected, status)
+				require.Error(t, err)
 			}
 		})
 	}

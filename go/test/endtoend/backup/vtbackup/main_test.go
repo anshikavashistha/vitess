@@ -27,6 +27,7 @@ import (
 	"vitess.io/vitess/go/test/endtoend/cluster"
 	"vitess.io/vitess/go/test/endtoend/utils"
 	"vitess.io/vitess/go/vt/log"
+	vtutils "vitess.io/vitess/go/vt/utils"
 )
 
 var (
@@ -43,12 +44,13 @@ var (
 	shardKsName      = fmt.Sprintf("%s/%s", keyspaceName, shardName)
 	dbCredentialFile string
 	commonTabletArg  = []string{
-		"--vreplication_retry_delay", "1s",
-		"--degraded_threshold", "5s",
-		"--lock_tables_timeout", "5s",
-		"--watch_replication_stream",
-		"--enable_replication_reporter",
-		"--serving_state_grace_period", "1s"}
+		vtutils.GetFlagVariantForTests("--vreplication-retry-delay"), "1s",
+		vtutils.GetFlagVariantForTests("--degraded-threshold"), "5s",
+		vtutils.GetFlagVariantForTests("--lock-tables-timeout"), "5s",
+		vtutils.GetFlagVariantForTests("--watch-replication-stream"),
+		vtutils.GetFlagVariantForTests("--enable-replication-reporter"),
+		vtutils.GetFlagVariantForTests("--serving-state-grace-period"), "1s",
+	}
 )
 
 func TestMain(m *testing.M) {
@@ -94,7 +96,7 @@ func TestMain(m *testing.M) {
 			return 1, err
 		}
 		newInitDBFile = path.Join(localCluster.TmpDirectory, "init_db_with_passwords.sql")
-		err = os.WriteFile(newInitDBFile, []byte(sql), 0666)
+		err = os.WriteFile(newInitDBFile, []byte(sql), 0o666)
 		if err != nil {
 			return 1, err
 		}
@@ -139,7 +141,7 @@ func TestMain(m *testing.M) {
 			// Running VTOrc and replication manager sometimes creates the situation where VTOrc has set up semi-sync on the primary,
 			// but the replication manager starts replication on the replica without setting semi-sync. This hangs the primary.
 			// Even if VTOrc fixes it, since there is no ongoing traffic, the state remains blocked.
-			if err := localCluster.StartVTOrc(keyspaceName); err != nil {
+			if err := localCluster.StartVTOrc(cell, keyspaceName); err != nil {
 				return 1, err
 			}
 		}
@@ -153,5 +155,4 @@ func TestMain(m *testing.M) {
 	} else {
 		os.Exit(exitCode)
 	}
-
 }

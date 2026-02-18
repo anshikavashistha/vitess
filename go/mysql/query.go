@@ -35,15 +35,16 @@ import (
 
 // This file contains the methods related to queries.
 
-var (
-	ErrExecuteFetchMultipleResults = vterrors.Errorf(vtrpc.Code_INTERNAL, "unexpected multiple results. Use ExecuteFetchMulti instead.")
-)
+var ErrExecuteFetchMultipleResults = vterrors.Errorf(vtrpc.Code_INTERNAL, "unexpected multiple results. Use ExecuteFetchMulti instead.")
 
 const (
 	// Use as `maxrows` in `ExecuteFetch` and related functions, to indicate no rows should be fetched.
 	// This is different than specifying `0`, because `0` means "expect zero results", while this means
 	// "do not attempt to read any results into memory".
 	FETCH_NO_ROWS = math.MinInt
+
+	// FETCH_ALL_ROWS used as `maxrows` in `ExecuteFetch` and related functions, to indicate all rows should be fetched.
+	FETCH_ALL_ROWS = -1
 )
 
 //
@@ -441,12 +442,10 @@ func (c *Conn) ReadQueryResult(maxrows int, wantfields bool) (*sqltypes.Result, 
 			return nil, false, 0, sqlerror.NewSQLErrorf(sqlerror.CRServerLost, sqlerror.SSUnknownSQLState, "%v", err)
 		}
 		if c.isEOFPacket(data) {
-
 			// This is what we expect.
 			// Warnings and status flags are ignored.
 			c.recycleReadPacket()
 			// goto: read row loop
-
 		} else if isErrorPacket(data) {
 			defer c.recycleReadPacket()
 			return nil, false, 0, ParseErrorPacket(data)
@@ -493,7 +492,6 @@ func (c *Conn) ReadQueryResult(maxrows int, wantfields bool) (*sqltypes.Result, 
 				result.Info = packetEof.info
 			}
 			return result, more, warnings, nil
-
 		} else if isErrorPacket(data) {
 			defer c.recycleReadPacket()
 			// Error packet.
@@ -506,7 +504,7 @@ func (c *Conn) ReadQueryResult(maxrows int, wantfields bool) (*sqltypes.Result, 
 		}
 
 		// Check we're not over the limit before we add more.
-		if len(result.Rows) == maxrows {
+		if maxrows != FETCH_ALL_ROWS && len(result.Rows) == maxrows {
 			c.recycleReadPacket()
 			if err := c.drainResults(); err != nil {
 				return nil, false, 0, err
@@ -630,7 +628,7 @@ func (c *Conn) parseComStmtExecute(prepareData map[uint32]*PrepareData, data []b
 	newParamsBoundFlag, pos, ok := readByte(payload, pos)
 	if ok && newParamsBoundFlag == 0x01 {
 		var mysqlType, flags byte
-		for i := range uint16(prepare.ParamsCount) {
+		for i := range prepare.ParamsCount {
 			mysqlType, pos, ok = readByte(payload, pos)
 			if !ok {
 				return stmtID, 0, sqlerror.NewSQLError(sqlerror.CRMalformedPacket, sqlerror.SSUnknownSQLState, "reading parameter type failed")
@@ -651,7 +649,7 @@ func (c *Conn) parseComStmtExecute(prepareData map[uint32]*PrepareData, data []b
 		}
 	}
 
-	for i := range len(prepare.ParamsType) {
+	for i := range prepare.ParamsCount {
 		var val sqltypes.Value
 		parameterID := fmt.Sprintf("v%d", i+1)
 		if v, ok := prepare.BindVars[parameterID]; ok {
@@ -1161,7 +1159,7 @@ func (c *Conn) writePrepare(fld []*querypb.Field, prepare *PrepareData) error {
 	}
 
 	for i, field := range fld {
-		field.Name = strings.Replace(field.Name, "'?'", "?", -1)
+		field.Name = strings.ReplaceAll(field.Name, "'?'", "?")
 		prepare.ColumnNames[i] = field.Name
 		if err := c.writeColumnDefinition(field); err != nil {
 			return err
@@ -1423,12 +1421,12 @@ func val2MySQL(v sqltypes.Value) ([]byte, error) {
 
 			sub1 := strings.Split(string(v.Raw()), ":")
 			if len(sub1) != 3 {
-				err := fmt.Errorf("incorrect time value, ':' is not found")
+				err := errors.New("incorrect time value, ':' is not found")
 				return []byte{}, err
 			}
 			sub2 := strings.Split(sub1[2], ".")
 			if len(sub2) != 2 {
-				err := fmt.Errorf("incorrect time value, '.' is not found")
+				err := errors.New("incorrect time value, '.' is not found")
 				return []byte{}, err
 			}
 
@@ -1485,7 +1483,7 @@ func val2MySQL(v sqltypes.Value) ([]byte, error) {
 
 			sub1 := strings.Split(string(v.Raw()), ":")
 			if len(sub1) != 3 {
-				err := fmt.Errorf("incorrect time value, ':' is not found")
+				err := errors.New("incorrect time value, ':' is not found")
 				return []byte{}, err
 			}
 
@@ -1524,7 +1522,7 @@ func val2MySQL(v sqltypes.Value) ([]byte, error) {
 			pos = writeByte(out, pos, byte(minutes))
 			writeByte(out, pos, byte(seconds))
 		} else {
-			err := fmt.Errorf("incorrect time value")
+			err := errors.New("incorrect time value")
 			return []byte{}, err
 		}
 	case sqltypes.Decimal, sqltypes.Text, sqltypes.Blob, sqltypes.VarChar,
@@ -1575,7 +1573,7 @@ func val2MySQLLen(v sqltypes.Value) (int, error) {
 		} else if len(v.Raw()) > 0 {
 			length = 9
 		} else {
-			err = fmt.Errorf("incorrect time value")
+			err = errors.New("incorrect time value")
 		}
 	case sqltypes.Decimal, sqltypes.Text, sqltypes.Blob, sqltypes.VarChar,
 		sqltypes.VarBinary, sqltypes.Char, sqltypes.Bit, sqltypes.Enum,

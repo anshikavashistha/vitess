@@ -38,6 +38,7 @@ const (
 	DeadPrimaryAndSomeReplicas             AnalysisCode = "DeadPrimaryAndSomeReplicas"
 	PrimaryHasPrimary                      AnalysisCode = "PrimaryHasPrimary"
 	PrimaryIsReadOnly                      AnalysisCode = "PrimaryIsReadOnly"
+	PrimaryCurrentTypeMismatch             AnalysisCode = "PrimaryCurrentTypeMismatch"
 	PrimarySemiSyncMustBeSet               AnalysisCode = "PrimarySemiSyncMustBeSet"
 	PrimarySemiSyncMustNotBeSet            AnalysisCode = "PrimarySemiSyncMustNotBeSet"
 	ReplicaIsWritable                      AnalysisCode = "ReplicaIsWritable"
@@ -49,6 +50,7 @@ const (
 	ReplicaMisconfigured                   AnalysisCode = "ReplicaMisconfigured"
 	UnreachablePrimaryWithLaggingReplicas  AnalysisCode = "UnreachablePrimaryWithLaggingReplicas"
 	UnreachablePrimary                     AnalysisCode = "UnreachablePrimary"
+	UnreachablePrimaryWithBrokenReplicas   AnalysisCode = "UnreachablePrimaryWithBrokenReplicas"
 	PrimarySingleReplicaNotReplicating     AnalysisCode = "PrimarySingleReplicaNotReplicating"
 	PrimarySingleReplicaDead               AnalysisCode = "PrimarySingleReplicaDead"
 	AllPrimaryReplicasNotReplicating       AnalysisCode = "AllPrimaryReplicasNotReplicating"
@@ -58,6 +60,10 @@ const (
 	PrimarySemiSyncBlocked                 AnalysisCode = "PrimarySemiSyncBlocked"
 	ErrantGTIDDetected                     AnalysisCode = "ErrantGTIDDetected"
 	PrimaryDiskStalled                     AnalysisCode = "PrimaryDiskStalled"
+
+	// StaleTopoPrimary describes when a tablet still has the type PRIMARY in the topology when a newer primary
+	// has been elected. VTOrc should demote this primary to a replica.
+	StaleTopoPrimary AnalysisCode = "StaleTopoPrimary"
 )
 
 type StructureAnalysisCode string
@@ -79,21 +85,28 @@ const (
 // Key of this map is a InstanceAnalysis.String()
 type PeerAnalysisMap map[string]int
 
-type ReplicationAnalysisHints struct {
+type DetectionAnalysisHints struct {
 	AuditAnalysis bool
 }
 
-// ReplicationAnalysis notes analysis on replication chain status, per instance
-type ReplicationAnalysis struct {
+// DetectionAnalysis represents an analysis of a detected problem.
+type DetectionAnalysis struct {
 	AnalyzedInstanceAlias        string
 	AnalyzedInstancePrimaryAlias string
-	TabletType                   topodatapb.TabletType
-	PrimaryTimeStamp             time.Time
-	ClusterDetails               ClusterInfo
-	AnalyzedKeyspace             string
-	AnalyzedShard                string
+
+	// TabletType is the tablet's type as seen in the topology.
+	TabletType topodatapb.TabletType
+
+	// CurrentTabletType is the type this tablet is currently running as.
+	CurrentTabletType topodatapb.TabletType
+
+	PrimaryTimeStamp                          time.Time
+	AnalyzedKeyspace                          string
+	AnalyzedShard                             string
+	AnalyzedKeyspaceEmergencyReparentDisabled bool
+	AnalyzedShardEmergencyReparentDisabled    bool
 	// ShardPrimaryTermTimestamp is the primary term start time stored in the shard record.
-	ShardPrimaryTermTimestamp                 string
+	ShardPrimaryTermTimestamp                 time.Time
 	AnalyzedInstanceBinlogCoordinates         BinlogCoordinates
 	IsPrimary                                 bool
 	IsClusterPrimary                          bool
@@ -135,11 +148,11 @@ type ReplicationAnalysis struct {
 	IsDiskStalled                             bool
 }
 
-func (replicationAnalysis *ReplicationAnalysis) MarshalJSON() ([]byte, error) {
+func (detectionAnalysis *DetectionAnalysis) MarshalJSON() ([]byte, error) {
 	i := struct {
-		ReplicationAnalysis
+		DetectionAnalysis
 	}{}
-	i.ReplicationAnalysis = *replicationAnalysis
+	i.DetectionAnalysis = *detectionAnalysis
 
 	return json.Marshal(i)
 }

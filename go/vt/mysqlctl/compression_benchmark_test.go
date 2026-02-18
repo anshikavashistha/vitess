@@ -150,7 +150,7 @@ func downloadData(url, localPath string, maxBytes int64) error {
 	}
 
 	// Create a local file to write the HTTP response to.
-	file, err := os.OpenFile(localPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0666)
+	file, err := os.OpenFile(localPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o666)
 	if err != nil {
 		return err
 	}
@@ -198,12 +198,9 @@ func newBenchmarkCompressEnv(args benchmarkCompressArgs) benchmarkCompressEnv {
 }
 
 func shouldCleanup(u *url.URL) (bool, error) {
-	c := true
+	c := !isLocal(u)
 
 	// Don't cleanup local paths provided by the user.
-	if isLocal(u) {
-		c = false
-	}
 
 	// Use user-defined cleanup, if specified and valid.
 	if udCleanup := os.Getenv(envVarCleanup); udCleanup != "" {

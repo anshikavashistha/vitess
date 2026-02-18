@@ -18,6 +18,8 @@ package tabletconn
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sync"
 
 	"github.com/spf13/pflag"
@@ -25,6 +27,7 @@ import (
 	"vitess.io/vitess/go/vt/grpcclient"
 	"vitess.io/vitess/go/vt/log"
 	"vitess.io/vitess/go/vt/servenv"
+	"vitess.io/vitess/go/vt/utils"
 	"vitess.io/vitess/go/vt/vterrors"
 	"vitess.io/vitess/go/vt/vttablet/queryservice"
 
@@ -42,7 +45,7 @@ var (
 // RegisterFlags registers the tabletconn flags on a given flagset. It is
 // exported for tests that need to inject a particular TabletProtocol.
 func RegisterFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&tabletProtocol, "tablet_protocol", "grpc", "Protocol to use to make queryservice RPCs to vttablets.")
+	utils.SetFlagStringVar(fs, &tabletProtocol, "tablet-protocol", "grpc", "Protocol to use to make queryservice RPCs to vttablets.")
 }
 
 func init() {
@@ -79,7 +82,8 @@ func RegisterDialer(name string, dialer TabletDialer) {
 	mu.Lock()
 	defer mu.Unlock()
 	if _, ok := dialers[name]; ok {
-		log.Fatalf("Dialer %s already exists", name)
+		log.Error(fmt.Sprintf("Dialer %s already exists", name))
+		os.Exit(1)
 	}
 	dialers[name] = dialer
 }
@@ -90,7 +94,8 @@ func GetDialer() TabletDialer {
 	defer mu.Unlock()
 	td, ok := dialers[tabletProtocol]
 	if !ok {
-		log.Exitf("No dialer registered for tablet protocol %s", tabletProtocol)
+		log.Error("No dialer registered for tablet protocol " + tabletProtocol)
+		os.Exit(1)
 	}
 	return td
 }
