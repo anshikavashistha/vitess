@@ -48639,6 +48639,499 @@ export const vtorcdata = $root.vtorcdata = (() => {
         return Shard;
     })();
 
+    vtorcdata.PrimaryHealthEvent = (function() {
+
+        /**
+         * Properties of a PrimaryHealthEvent.
+         * @memberof vtorcdata
+         * @interface IPrimaryHealthEvent
+         * @property {number|Long|null} [at_unix_nanos] PrimaryHealthEvent at_unix_nanos
+         * @property {boolean|null} [success] PrimaryHealthEvent success
+         */
+
+        /**
+         * Constructs a new PrimaryHealthEvent.
+         * @memberof vtorcdata
+         * @classdesc Represents a PrimaryHealthEvent.
+         * @implements IPrimaryHealthEvent
+         * @constructor
+         * @param {vtorcdata.IPrimaryHealthEvent=} [properties] Properties to set
+         */
+        function PrimaryHealthEvent(properties) {
+            if (properties)
+                for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                    if (properties[keys[i]] != null)
+                        this[keys[i]] = properties[keys[i]];
+        }
+
+        /**
+         * PrimaryHealthEvent at_unix_nanos.
+         * @member {number|Long} at_unix_nanos
+         * @memberof vtorcdata.PrimaryHealthEvent
+         * @instance
+         */
+        PrimaryHealthEvent.prototype.at_unix_nanos = $util.Long ? $util.Long.fromBits(0,0,false) : 0;
+
+        /**
+         * PrimaryHealthEvent success.
+         * @member {boolean} success
+         * @memberof vtorcdata.PrimaryHealthEvent
+         * @instance
+         */
+        PrimaryHealthEvent.prototype.success = false;
+
+        /**
+         * Creates a new PrimaryHealthEvent instance using the specified properties.
+         * @function create
+         * @memberof vtorcdata.PrimaryHealthEvent
+         * @static
+         * @param {vtorcdata.IPrimaryHealthEvent=} [properties] Properties to set
+         * @returns {vtorcdata.PrimaryHealthEvent} PrimaryHealthEvent instance
+         */
+        PrimaryHealthEvent.create = function create(properties) {
+            return new PrimaryHealthEvent(properties);
+        };
+
+        /**
+         * Encodes the specified PrimaryHealthEvent message. Does not implicitly {@link vtorcdata.PrimaryHealthEvent.verify|verify} messages.
+         * @function encode
+         * @memberof vtorcdata.PrimaryHealthEvent
+         * @static
+         * @param {vtorcdata.IPrimaryHealthEvent} message PrimaryHealthEvent message or plain object to encode
+         * @param {$protobuf.Writer} [writer] Writer to encode to
+         * @returns {$protobuf.Writer} Writer
+         */
+        PrimaryHealthEvent.encode = function encode(message, writer) {
+            if (!writer)
+                writer = $Writer.create();
+            if (message.at_unix_nanos != null && Object.hasOwnProperty.call(message, "at_unix_nanos"))
+                writer.uint32(/* id 1, wireType 0 =*/8).int64(message.at_unix_nanos);
+            if (message.success != null && Object.hasOwnProperty.call(message, "success"))
+                writer.uint32(/* id 2, wireType 0 =*/16).bool(message.success);
+            return writer;
+        };
+
+        /**
+         * Encodes the specified PrimaryHealthEvent message, length delimited. Does not implicitly {@link vtorcdata.PrimaryHealthEvent.verify|verify} messages.
+         * @function encodeDelimited
+         * @memberof vtorcdata.PrimaryHealthEvent
+         * @static
+         * @param {vtorcdata.IPrimaryHealthEvent} message PrimaryHealthEvent message or plain object to encode
+         * @param {$protobuf.Writer} [writer] Writer to encode to
+         * @returns {$protobuf.Writer} Writer
+         */
+        PrimaryHealthEvent.encodeDelimited = function encodeDelimited(message, writer) {
+            return this.encode(message, writer).ldelim();
+        };
+
+        /**
+         * Decodes a PrimaryHealthEvent message from the specified reader or buffer.
+         * @function decode
+         * @memberof vtorcdata.PrimaryHealthEvent
+         * @static
+         * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+         * @param {number} [length] Message length if known beforehand
+         * @returns {vtorcdata.PrimaryHealthEvent} PrimaryHealthEvent
+         * @throws {Error} If the payload is not a reader or valid buffer
+         * @throws {$protobuf.util.ProtocolError} If required fields are missing
+         */
+        PrimaryHealthEvent.decode = function decode(reader, length, error) {
+            if (!(reader instanceof $Reader))
+                reader = $Reader.create(reader);
+            let end = length === undefined ? reader.len : reader.pos + length, message = new $root.vtorcdata.PrimaryHealthEvent();
+            while (reader.pos < end) {
+                let tag = reader.uint32();
+                if (tag === error)
+                    break;
+                switch (tag >>> 3) {
+                case 1: {
+                        message.at_unix_nanos = reader.int64();
+                        break;
+                    }
+                case 2: {
+                        message.success = reader.bool();
+                        break;
+                    }
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+                }
+            }
+            return message;
+        };
+
+        /**
+         * Decodes a PrimaryHealthEvent message from the specified reader or buffer, length delimited.
+         * @function decodeDelimited
+         * @memberof vtorcdata.PrimaryHealthEvent
+         * @static
+         * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+         * @returns {vtorcdata.PrimaryHealthEvent} PrimaryHealthEvent
+         * @throws {Error} If the payload is not a reader or valid buffer
+         * @throws {$protobuf.util.ProtocolError} If required fields are missing
+         */
+        PrimaryHealthEvent.decodeDelimited = function decodeDelimited(reader) {
+            if (!(reader instanceof $Reader))
+                reader = new $Reader(reader);
+            return this.decode(reader, reader.uint32());
+        };
+
+        /**
+         * Verifies a PrimaryHealthEvent message.
+         * @function verify
+         * @memberof vtorcdata.PrimaryHealthEvent
+         * @static
+         * @param {Object.<string,*>} message Plain object to verify
+         * @returns {string|null} `null` if valid, otherwise the reason why it is not
+         */
+        PrimaryHealthEvent.verify = function verify(message) {
+            if (typeof message !== "object" || message === null)
+                return "object expected";
+            if (message.at_unix_nanos != null && message.hasOwnProperty("at_unix_nanos"))
+                if (!$util.isInteger(message.at_unix_nanos) && !(message.at_unix_nanos && $util.isInteger(message.at_unix_nanos.low) && $util.isInteger(message.at_unix_nanos.high)))
+                    return "at_unix_nanos: integer|Long expected";
+            if (message.success != null && message.hasOwnProperty("success"))
+                if (typeof message.success !== "boolean")
+                    return "success: boolean expected";
+            return null;
+        };
+
+        /**
+         * Creates a PrimaryHealthEvent message from a plain object. Also converts values to their respective internal types.
+         * @function fromObject
+         * @memberof vtorcdata.PrimaryHealthEvent
+         * @static
+         * @param {Object.<string,*>} object Plain object
+         * @returns {vtorcdata.PrimaryHealthEvent} PrimaryHealthEvent
+         */
+        PrimaryHealthEvent.fromObject = function fromObject(object) {
+            if (object instanceof $root.vtorcdata.PrimaryHealthEvent)
+                return object;
+            let message = new $root.vtorcdata.PrimaryHealthEvent();
+            if (object.at_unix_nanos != null)
+                if ($util.Long)
+                    (message.at_unix_nanos = $util.Long.fromValue(object.at_unix_nanos)).unsigned = false;
+                else if (typeof object.at_unix_nanos === "string")
+                    message.at_unix_nanos = parseInt(object.at_unix_nanos, 10);
+                else if (typeof object.at_unix_nanos === "number")
+                    message.at_unix_nanos = object.at_unix_nanos;
+                else if (typeof object.at_unix_nanos === "object")
+                    message.at_unix_nanos = new $util.LongBits(object.at_unix_nanos.low >>> 0, object.at_unix_nanos.high >>> 0).toNumber();
+            if (object.success != null)
+                message.success = Boolean(object.success);
+            return message;
+        };
+
+        /**
+         * Creates a plain object from a PrimaryHealthEvent message. Also converts values to other types if specified.
+         * @function toObject
+         * @memberof vtorcdata.PrimaryHealthEvent
+         * @static
+         * @param {vtorcdata.PrimaryHealthEvent} message PrimaryHealthEvent
+         * @param {$protobuf.IConversionOptions} [options] Conversion options
+         * @returns {Object.<string,*>} Plain object
+         */
+        PrimaryHealthEvent.toObject = function toObject(message, options) {
+            if (!options)
+                options = {};
+            let object = {};
+            if (options.defaults) {
+                if ($util.Long) {
+                    let long = new $util.Long(0, 0, false);
+                    object.at_unix_nanos = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : long;
+                } else
+                    object.at_unix_nanos = options.longs === String ? "0" : 0;
+                object.success = false;
+            }
+            if (message.at_unix_nanos != null && message.hasOwnProperty("at_unix_nanos"))
+                if (typeof message.at_unix_nanos === "number")
+                    object.at_unix_nanos = options.longs === String ? String(message.at_unix_nanos) : message.at_unix_nanos;
+                else
+                    object.at_unix_nanos = options.longs === String ? $util.Long.prototype.toString.call(message.at_unix_nanos) : options.longs === Number ? new $util.LongBits(message.at_unix_nanos.low >>> 0, message.at_unix_nanos.high >>> 0).toNumber() : message.at_unix_nanos;
+            if (message.success != null && message.hasOwnProperty("success"))
+                object.success = message.success;
+            return object;
+        };
+
+        /**
+         * Converts this PrimaryHealthEvent to JSON.
+         * @function toJSON
+         * @memberof vtorcdata.PrimaryHealthEvent
+         * @instance
+         * @returns {Object.<string,*>} JSON object
+         */
+        PrimaryHealthEvent.prototype.toJSON = function toJSON() {
+            return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+        };
+
+        /**
+         * Gets the default type url for PrimaryHealthEvent
+         * @function getTypeUrl
+         * @memberof vtorcdata.PrimaryHealthEvent
+         * @static
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
+         */
+        PrimaryHealthEvent.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/vtorcdata.PrimaryHealthEvent";
+        };
+
+        return PrimaryHealthEvent;
+    })();
+
+    vtorcdata.PrimaryHealthState = (function() {
+
+        /**
+         * Properties of a PrimaryHealthState.
+         * @memberof vtorcdata
+         * @interface IPrimaryHealthState
+         * @property {Array.<vtorcdata.IPrimaryHealthEvent>|null} [events] PrimaryHealthState events
+         * @property {boolean|null} [unhealthy] PrimaryHealthState unhealthy
+         */
+
+        /**
+         * Constructs a new PrimaryHealthState.
+         * @memberof vtorcdata
+         * @classdesc Represents a PrimaryHealthState.
+         * @implements IPrimaryHealthState
+         * @constructor
+         * @param {vtorcdata.IPrimaryHealthState=} [properties] Properties to set
+         */
+        function PrimaryHealthState(properties) {
+            this.events = [];
+            if (properties)
+                for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                    if (properties[keys[i]] != null)
+                        this[keys[i]] = properties[keys[i]];
+        }
+
+        /**
+         * PrimaryHealthState events.
+         * @member {Array.<vtorcdata.IPrimaryHealthEvent>} events
+         * @memberof vtorcdata.PrimaryHealthState
+         * @instance
+         */
+        PrimaryHealthState.prototype.events = $util.emptyArray;
+
+        /**
+         * PrimaryHealthState unhealthy.
+         * @member {boolean} unhealthy
+         * @memberof vtorcdata.PrimaryHealthState
+         * @instance
+         */
+        PrimaryHealthState.prototype.unhealthy = false;
+
+        /**
+         * Creates a new PrimaryHealthState instance using the specified properties.
+         * @function create
+         * @memberof vtorcdata.PrimaryHealthState
+         * @static
+         * @param {vtorcdata.IPrimaryHealthState=} [properties] Properties to set
+         * @returns {vtorcdata.PrimaryHealthState} PrimaryHealthState instance
+         */
+        PrimaryHealthState.create = function create(properties) {
+            return new PrimaryHealthState(properties);
+        };
+
+        /**
+         * Encodes the specified PrimaryHealthState message. Does not implicitly {@link vtorcdata.PrimaryHealthState.verify|verify} messages.
+         * @function encode
+         * @memberof vtorcdata.PrimaryHealthState
+         * @static
+         * @param {vtorcdata.IPrimaryHealthState} message PrimaryHealthState message or plain object to encode
+         * @param {$protobuf.Writer} [writer] Writer to encode to
+         * @returns {$protobuf.Writer} Writer
+         */
+        PrimaryHealthState.encode = function encode(message, writer) {
+            if (!writer)
+                writer = $Writer.create();
+            if (message.events != null && message.events.length)
+                for (let i = 0; i < message.events.length; ++i)
+                    $root.vtorcdata.PrimaryHealthEvent.encode(message.events[i], writer.uint32(/* id 1, wireType 2 =*/10).fork()).ldelim();
+            if (message.unhealthy != null && Object.hasOwnProperty.call(message, "unhealthy"))
+                writer.uint32(/* id 2, wireType 0 =*/16).bool(message.unhealthy);
+            return writer;
+        };
+
+        /**
+         * Encodes the specified PrimaryHealthState message, length delimited. Does not implicitly {@link vtorcdata.PrimaryHealthState.verify|verify} messages.
+         * @function encodeDelimited
+         * @memberof vtorcdata.PrimaryHealthState
+         * @static
+         * @param {vtorcdata.IPrimaryHealthState} message PrimaryHealthState message or plain object to encode
+         * @param {$protobuf.Writer} [writer] Writer to encode to
+         * @returns {$protobuf.Writer} Writer
+         */
+        PrimaryHealthState.encodeDelimited = function encodeDelimited(message, writer) {
+            return this.encode(message, writer).ldelim();
+        };
+
+        /**
+         * Decodes a PrimaryHealthState message from the specified reader or buffer.
+         * @function decode
+         * @memberof vtorcdata.PrimaryHealthState
+         * @static
+         * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+         * @param {number} [length] Message length if known beforehand
+         * @returns {vtorcdata.PrimaryHealthState} PrimaryHealthState
+         * @throws {Error} If the payload is not a reader or valid buffer
+         * @throws {$protobuf.util.ProtocolError} If required fields are missing
+         */
+        PrimaryHealthState.decode = function decode(reader, length, error) {
+            if (!(reader instanceof $Reader))
+                reader = $Reader.create(reader);
+            let end = length === undefined ? reader.len : reader.pos + length, message = new $root.vtorcdata.PrimaryHealthState();
+            while (reader.pos < end) {
+                let tag = reader.uint32();
+                if (tag === error)
+                    break;
+                switch (tag >>> 3) {
+                case 1: {
+                        if (!(message.events && message.events.length))
+                            message.events = [];
+                        message.events.push($root.vtorcdata.PrimaryHealthEvent.decode(reader, reader.uint32()));
+                        break;
+                    }
+                case 2: {
+                        message.unhealthy = reader.bool();
+                        break;
+                    }
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+                }
+            }
+            return message;
+        };
+
+        /**
+         * Decodes a PrimaryHealthState message from the specified reader or buffer, length delimited.
+         * @function decodeDelimited
+         * @memberof vtorcdata.PrimaryHealthState
+         * @static
+         * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+         * @returns {vtorcdata.PrimaryHealthState} PrimaryHealthState
+         * @throws {Error} If the payload is not a reader or valid buffer
+         * @throws {$protobuf.util.ProtocolError} If required fields are missing
+         */
+        PrimaryHealthState.decodeDelimited = function decodeDelimited(reader) {
+            if (!(reader instanceof $Reader))
+                reader = new $Reader(reader);
+            return this.decode(reader, reader.uint32());
+        };
+
+        /**
+         * Verifies a PrimaryHealthState message.
+         * @function verify
+         * @memberof vtorcdata.PrimaryHealthState
+         * @static
+         * @param {Object.<string,*>} message Plain object to verify
+         * @returns {string|null} `null` if valid, otherwise the reason why it is not
+         */
+        PrimaryHealthState.verify = function verify(message) {
+            if (typeof message !== "object" || message === null)
+                return "object expected";
+            if (message.events != null && message.hasOwnProperty("events")) {
+                if (!Array.isArray(message.events))
+                    return "events: array expected";
+                for (let i = 0; i < message.events.length; ++i) {
+                    let error = $root.vtorcdata.PrimaryHealthEvent.verify(message.events[i]);
+                    if (error)
+                        return "events." + error;
+                }
+            }
+            if (message.unhealthy != null && message.hasOwnProperty("unhealthy"))
+                if (typeof message.unhealthy !== "boolean")
+                    return "unhealthy: boolean expected";
+            return null;
+        };
+
+        /**
+         * Creates a PrimaryHealthState message from a plain object. Also converts values to their respective internal types.
+         * @function fromObject
+         * @memberof vtorcdata.PrimaryHealthState
+         * @static
+         * @param {Object.<string,*>} object Plain object
+         * @returns {vtorcdata.PrimaryHealthState} PrimaryHealthState
+         */
+        PrimaryHealthState.fromObject = function fromObject(object) {
+            if (object instanceof $root.vtorcdata.PrimaryHealthState)
+                return object;
+            let message = new $root.vtorcdata.PrimaryHealthState();
+            if (object.events) {
+                if (!Array.isArray(object.events))
+                    throw TypeError(".vtorcdata.PrimaryHealthState.events: array expected");
+                message.events = [];
+                for (let i = 0; i < object.events.length; ++i) {
+                    if (typeof object.events[i] !== "object")
+                        throw TypeError(".vtorcdata.PrimaryHealthState.events: object expected");
+                    message.events[i] = $root.vtorcdata.PrimaryHealthEvent.fromObject(object.events[i]);
+                }
+            }
+            if (object.unhealthy != null)
+                message.unhealthy = Boolean(object.unhealthy);
+            return message;
+        };
+
+        /**
+         * Creates a plain object from a PrimaryHealthState message. Also converts values to other types if specified.
+         * @function toObject
+         * @memberof vtorcdata.PrimaryHealthState
+         * @static
+         * @param {vtorcdata.PrimaryHealthState} message PrimaryHealthState
+         * @param {$protobuf.IConversionOptions} [options] Conversion options
+         * @returns {Object.<string,*>} Plain object
+         */
+        PrimaryHealthState.toObject = function toObject(message, options) {
+            if (!options)
+                options = {};
+            let object = {};
+            if (options.arrays || options.defaults)
+                object.events = [];
+            if (options.defaults)
+                object.unhealthy = false;
+            if (message.events && message.events.length) {
+                object.events = [];
+                for (let j = 0; j < message.events.length; ++j)
+                    object.events[j] = $root.vtorcdata.PrimaryHealthEvent.toObject(message.events[j], options);
+            }
+            if (message.unhealthy != null && message.hasOwnProperty("unhealthy"))
+                object.unhealthy = message.unhealthy;
+            return object;
+        };
+
+        /**
+         * Converts this PrimaryHealthState to JSON.
+         * @function toJSON
+         * @memberof vtorcdata.PrimaryHealthState
+         * @instance
+         * @returns {Object.<string,*>} JSON object
+         */
+        PrimaryHealthState.prototype.toJSON = function toJSON() {
+            return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+        };
+
+        /**
+         * Gets the default type url for PrimaryHealthState
+         * @function getTypeUrl
+         * @memberof vtorcdata.PrimaryHealthState
+         * @static
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
+         */
+        PrimaryHealthState.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/vtorcdata.PrimaryHealthState";
+        };
+
+        return PrimaryHealthState;
+    })();
+
     return vtorcdata;
 })();
 
@@ -93650,6 +94143,7 @@ export const binlogdata = $root.binlogdata = (() => {
      * @property {number} SAVEPOINT=19 SAVEPOINT value
      * @property {number} COPY_COMPLETED=20 COPY_COMPLETED value
      * @property {number} PREVIOUS_GTIDS=21 PREVIOUS_GTIDS value
+     * @property {number} ROWS_QUERY=22 ROWS_QUERY value
      */
     binlogdata.VEventType = (function() {
         const valuesById = {}, values = Object.create(valuesById);
@@ -93675,6 +94169,7 @@ export const binlogdata = $root.binlogdata = (() => {
         values[valuesById[19] = "SAVEPOINT"] = 19;
         values[valuesById[20] = "COPY_COMPLETED"] = 20;
         values[valuesById[21] = "PREVIOUS_GTIDS"] = 21;
+        values[valuesById[22] = "ROWS_QUERY"] = 22;
         return values;
     })();
 
@@ -96544,6 +97039,7 @@ export const binlogdata = $root.binlogdata = (() => {
                 case 19:
                 case 20:
                 case 21:
+                case 22:
                     break;
                 }
             if (message.timestamp != null && message.hasOwnProperty("timestamp"))
@@ -96716,6 +97212,10 @@ export const binlogdata = $root.binlogdata = (() => {
             case "PREVIOUS_GTIDS":
             case 21:
                 message.type = 21;
+                break;
+            case "ROWS_QUERY":
+            case 22:
+                message.type = 22;
                 break;
             }
             if (object.timestamp != null)
@@ -97773,6 +98273,7 @@ export const binlogdata = $root.binlogdata = (() => {
                     case 19:
                     case 20:
                     case 21:
+                    case 22:
                         break;
                     }
             }
@@ -97912,6 +98413,10 @@ export const binlogdata = $root.binlogdata = (() => {
                     case "PREVIOUS_GTIDS":
                     case 21:
                         message.event_types[i] = 21;
+                        break;
+                    case "ROWS_QUERY":
+                    case 22:
+                        message.event_types[i] = 22;
                         break;
                     }
             }
